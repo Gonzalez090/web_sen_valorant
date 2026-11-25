@@ -8,6 +8,7 @@ import {
   hFovToVFov,
   isValidDpi,
   isValidSens,
+  lookToEuler,
   normalizeAngle,
   roundSens,
   SENS_MIN,
@@ -190,5 +191,13 @@ describe('angles', () => {
   ])('applyMouseDelta ignores bad input (dx=%s, dy=%s, sens=%s)', (dx, dy, sens) => {
     const start = { yaw: 12, pitch: -3 }
     expect(applyMouseDelta(start, dx, dy, sens)).toEqual(start)
+  })
+})
+
+describe('lookToEuler', () => {
+  it('maps yaw right to negative Y rotation and pitch up to positive X', () => {
+    const e = lookToEuler({ yaw: 90, pitch: 45 })
+    expect(e.y).toBeCloseTo(-Math.PI / 2)
+    expect(e.x).toBeCloseTo(Math.PI / 4)
   })
 })

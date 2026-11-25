@@ -1,4 +1,50 @@
-node_modules
-dist
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
 *.tsbuildinfo
-.vite
+.vite/
+
+# Test / coverage
+coverage/
+test-results/
+playwright-report/
+*.lcov
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor / IDE
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.sw?
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Claude Code local files (personal settings, not for the repo)
+.claude/settings.local.json
+graphify-out/
+
+# Temp files from testing (screenshots, GIFs, scratch)
+*.tmp
+tmp/
+screenshots/
+*.gif

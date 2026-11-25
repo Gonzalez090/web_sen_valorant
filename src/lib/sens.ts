@@ -144,6 +144,14 @@ export function applyMouseDelta(
   }
 }
 
+/**
+ * Converts look angles to a three.js Euler (radians, order 'YXZ').
+ * three.js turns left for positive Y rotation, so yaw is negated.
+ */
+export function lookToEuler(look: LookAngles): { x: number; y: number } {
+  return { x: toRad(look.pitch), y: -toRad(look.yaw) }
+}
+
 export function toRad(deg: number): number {
   return (deg * Math.PI) / 180
 }
