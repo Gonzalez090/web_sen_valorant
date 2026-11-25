@@ -1,7 +1,10 @@
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useMemo, useRef, type MutableRefObject, type ReactNode, type RefObject } from 'react'
 import * as THREE from 'three'
-import { applyMouseDelta, isValidSens, lookToEuler, toRad, valorantVFov, type LookAngles } from '../lib/sens'
+import { applyInput, type LookTracker } from '../lib/look'
+import { lookToEuler, toRad, valorantVFov } from '../lib/sens'
+
+export type { LookTracker } from '../lib/look'
 
 /** Eye height above the floor, in metres. */
 const EYE_HEIGHT = 1.6
@@ -10,13 +13,6 @@ const ROOM_HEIGHT = 24
 /** Grid cell size in metres. */
 const CELL = 2
 const MARKER_RADIUS = 20
-
-export interface LookTracker {
-  /** Current view angles (yaw wrapped, pitch clamped). */
-  look: LookAngles
-  /** Total mouse counts applied since mount, for verifying the formula. */
-  totalCounts: { x: number; y: number }
-}
 
 interface AimSceneProps {
   sens: number
@@ -60,13 +56,8 @@ function CameraRig({ sens, consume, tracker }: Pick<AimSceneProps, 'sens' | 'con
 
   useFrame(() => {
     const { dx, dy } = consume()
-    const t = tracker.current
-    if ((dx !== 0 || dy !== 0) && isValidSens(sensRef.current)) {
-      t.look = applyMouseDelta(t.look, dx, dy, sensRef.current)
-      t.totalCounts.x += dx
-      t.totalCounts.y += dy
-    }
-    const e = lookToEuler(t.look)
+    applyInput(tracker.current, dx, dy, sensRef.current)
+    const e = lookToEuler(tracker.current.look)
     camera.rotation.set(e.x, e.y, 0, 'YXZ')
   })
   return null

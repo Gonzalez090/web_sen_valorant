@@ -25,7 +25,7 @@
 ### สถานะขั้นตอน
 - [x] 1. lib/sens.ts + test
 - [x] 2. usePointerLock + AimScene หมุนกล้องตรงสูตร
-- [ ] 3. ด่านทั้ง 3 + เก็บ metrics
+- [x] 3. ด่านทั้ง 3 + เก็บ metrics
 - [ ] 4. PSA flow + หน้าผลลัพธ์
 - [ ] 5. UI ตาม design system + ขัดเกลา
 
