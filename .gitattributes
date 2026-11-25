@@ -1,0 +1,2 @@
+# The CSP in vercel.json pins a sha256 of index.html's inline script; CRLF would change that hash.
+index.html text eol=lf
