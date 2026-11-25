@@ -26,7 +26,7 @@
 - [x] 1. lib/sens.ts + test
 - [x] 2. usePointerLock + AimScene หมุนกล้องตรงสูตร
 - [x] 3. ด่านทั้ง 3 + เก็บ metrics
-- [ ] 4. PSA flow + หน้าผลลัพธ์
+- [x] 4. PSA flow + หน้าผลลัพธ์
 - [ ] 5. UI ตาม design system + ขัดเกลา
 
 ---

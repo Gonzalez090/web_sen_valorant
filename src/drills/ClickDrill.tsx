@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 import {
   evaluateClickTrial,
   summarizeClickTrials,
-  type ClickSummary,
+  type ClickDrillResult,
   type ClickTrial,
   type ClickTrialResult,
   type Sample,
@@ -12,11 +12,7 @@ import type { LookAngles } from '../lib/sens'
 import { placeTarget, TARGET_DISTANCE, type ClickDrillConfig, type Offset } from '../lib/targets'
 import { MAX_FRAME_S, positionFor, type DrillProps } from './common'
 
-export interface ClickDrillResult {
-  kind: 'flick' | 'micro'
-  summary: ClickSummary
-  trials: ClickTrialResult[]
-}
+export type { ClickDrillResult } from '../lib/metrics'
 
 interface ClickDrillProps extends DrillProps {
   kind: 'flick' | 'micro'

@@ -1,15 +1,12 @@
 import { useFrame } from '@react-three/fiber'
 import { useMemo, useRef } from 'react'
 import type * as THREE from 'three'
-import { summarizeTracking, type TrackingSample, type TrackingSummary } from '../lib/metrics'
+import { summarizeTracking, type TrackingResult, type TrackingSample } from '../lib/metrics'
 import { normalizeAngle, toRad, type LookAngles } from '../lib/sens'
 import { generateStrafePath, strafeOffsetAt, TARGET_DISTANCE, trackingStart, TRACKING } from '../lib/targets'
 import { MAX_FRAME_S, positionFor, type DrillProps } from './common'
 
-export interface TrackingResult {
-  kind: 'tracking'
-  summary: TrackingSummary
-}
+export type { TrackingResult } from '../lib/metrics'
 
 /** Body box size in metres, derived from its angular size at TARGET_DISTANCE. */
 const BODY_W = 2 * TARGET_DISTANCE * Math.tan(toRad(TRACKING.halfWidthDeg))

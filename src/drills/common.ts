@@ -1,9 +1,10 @@
 import type { MutableRefObject } from 'react'
 import type { LookTracker } from '../lib/look'
 import { lookToDirection } from '../lib/look'
+import type { DrillKind } from '../lib/metrics'
 import type { LookAngles } from '../lib/sens'
 
-export type DrillKind = 'flick' | 'micro' | 'tracking'
+export type { DrillKind } from '../lib/metrics'
 
 export interface DrillProps {
   /** Same seed gives the same targets, so sens A and B face identical drills. */

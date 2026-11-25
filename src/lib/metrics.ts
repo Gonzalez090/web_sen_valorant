@@ -233,3 +233,19 @@ export function summarizeTracking(samples: TrackingSample[], halfWidthDeg: numbe
     meanErrorDeg: total ? errSum / total : 0,
   }
 }
+
+/** What a click drill (Flick / Micro) reports when it finishes. */
+export interface ClickDrillResult {
+  kind: 'flick' | 'micro'
+  summary: ClickSummary
+  trials: ClickTrialResult[]
+}
+
+export interface TrackingResult {
+  kind: 'tracking'
+  summary: TrackingSummary
+}
+
+export type DrillResult = ClickDrillResult | TrackingResult
+
+export type DrillKind = DrillResult['kind']
