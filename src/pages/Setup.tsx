@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import type { Role } from '@/lib/scoring'
-import { FULL_SESSION_EST_S, isFinished, progress } from '@/lib/session'
+import { FULL_SESSION_EST_S, isFinished, progress, summarizeSession } from '@/lib/session'
 import { DPI_MAX, DPI_MIN, isValidDpi, isValidSens, roundSens } from '@/lib/sens'
 import { cn, minutesText, radioKeyDown } from '@/lib/utils'
 import { useSessionStore } from '@/store/useSessionStore'
@@ -99,7 +99,7 @@ export function Setup() {
       <div className="w-full max-w-lg">
         <motion.header {...fadeUp(0)} className="mb-10 text-center">
           <h1 className="text-4xl font-bold tracking-tight sm:text-5xl">หาเซนส์ที่ใช่สำหรับคุณ</h1>
-          <p className="mt-3 text-base text-muted">เล็งในห้องซ้อม เทียบเซนส์ทีละคู่ จนเหลือค่าที่คุณคุมได้ดีที่สุด</p>
+          <p className="mt-3 text-base text-muted">เล่นหลายค่าเซนส์ วัดผลจริง แล้วหาค่าที่คุณเล่นได้ดีที่สุด</p>
         </motion.header>
 
         {needsDesktop && (
@@ -122,7 +122,7 @@ export function Setup() {
                 <h2 className="text-lg font-semibold">มีการทดสอบค้างอยู่</h2>
               </div>
               <p className="mt-1 mb-5 text-sm text-muted tabular-nums">
-                {session.warmup ? 'วอร์มอัป' : `รอบ ${prog.round}/${prog.totalRounds}`} · เหลือ{minutesText(prog.remainingS)}
+                {session.warmup ? 'วอร์มอัป' : `ชุด ${prog.set}/${prog.totalSets}`} · เหลือ{minutesText(prog.remainingS)}
               </p>
               <Button data-testid="resume-session" autoFocus size="lg" className="w-full" onClick={resume}>
                 ทำต่อจากที่ค้างไว้ <ArrowRight className="size-5" strokeWidth={2} aria-hidden />
@@ -136,7 +136,7 @@ export function Setup() {
             <Card data-testid="last-result-card" className="mb-4 flex items-center justify-between gap-3 p-5">
               <span className="flex items-center gap-3 text-sm text-muted">
                 <Trophy className="size-5 text-good" strokeWidth={1.75} aria-hidden />
-                ผลล่าสุด <b className="text-lg font-bold text-fg tabular-nums">{roundSens(session.psa.base).toFixed(3)}</b>
+                ผลล่าสุด <b className="text-lg font-bold text-fg tabular-nums">{roundSens(summarizeSession(session).sens).toFixed(3)}</b>
               </span>
               <Button data-testid="view-last-result" variant="secondary" size="sm" onClick={resume}>
                 ดูผล

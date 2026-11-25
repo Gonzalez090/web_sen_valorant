@@ -1,9 +1,7 @@
 import { create } from 'zustand'
 import { createJSONStorage, persist } from 'zustand/middleware'
 import type { DrillResult } from '../lib/metrics'
-import type { Preference } from '../lib/scoring'
-import { roundSens } from '../lib/sens'
-import { choose, fineSession, newSession, recordDrill, type Session, type Settings } from '../lib/session'
+import { extendSession, newSession, recordDrill, type Session, type Settings } from '../lib/session'
 
 export type View = 'setup' | 'session'
 export type Theme = 'dark' | 'light'
@@ -26,9 +24,8 @@ interface SessionStore {
   /** Back to an in-progress session from the setup page. */
   resume: () => void
   recordDrill: (result: DrillResult) => void
-  choose: (pref: Preference) => void
-  /** New search from the current result with k = 0.1. */
-  fineTune: () => void
+  /** "ทดสอบเพิ่ม": one more fine sweep around the result, combined with the data so far. */
+  extend: () => void
   /** Leaves to the setup page, keeping the session so it can be resumed. */
   exitToSetup: () => void
   /** Drops the session and the saved form settings, and goes back to setup. */
@@ -60,14 +57,9 @@ export const useSessionStore = create<SessionStore>()(
         const s = get().session
         if (s) set({ session: recordDrill(s, result) })
       },
-      choose: (pref) => {
+      extend: () => {
         const s = get().session
-        if (s) set({ session: choose(s, pref, randomSeed()) })
-      },
-      fineTune: () => {
-        const s = get().session
-        // Start from the value the player saw and copied, not the unrounded base.
-        if (s) set({ session: fineSession(s.settings, roundSens(s.psa.base), randomSeed()), view: 'session' })
+        if (s) set({ session: extendSession(s, randomSeed()), view: 'session' })
       },
       exitToSetup: () => set({ view: 'setup' }),
       reset: () => set({ session: null, lastSettings: null, view: 'setup' }),
@@ -78,7 +70,12 @@ export const useSessionStore = create<SessionStore>()(
     }),
     {
       name: 'sens-finder-session',
-      version: 1,
+      // v2: sensitivity sweep replaced the A/B search; older saved sessions can't be resumed.
+      version: 2,
+      migrate: (state, version) => {
+        const s = (state ?? {}) as Record<string, unknown>
+        return (version < 2 ? { ...s, session: null, view: 'setup' } : s) as never
+      },
       storage: createJSONStorage(() => localStorage),
       partialize: ({ view, session, lastSettings, soundOn, theme, crosshairColor }) => ({ view, session, lastSettings, soundOn, theme, crosshairColor }),
     },

@@ -1,6 +1,6 @@
 import type { ClickDrillResult, ClickSummary, TrackingResult } from './metrics'
 
-/** Everything measured for one sensitivity: one run of each drill. */
+/** Everything measured for one sensitivity: one run of each drill (one set). */
 export interface CandidateRun {
   flick: ClickDrillResult
   micro: ClickDrillResult
@@ -43,6 +43,16 @@ export function flickRelativeError(r: ClickDrillResult): number | null {
   )
 }
 
+/**
+ * Mean signed first-movement error / distance over attempted flicks (+ overshoot, − undershoot);
+ * null if none were attempted. Its trend across sensitivities shows where flicks balance out.
+ */
+export function flickLead(r: ClickDrillResult): number | null {
+  return mean(
+    r.trials.flatMap((t) => (t.attempted && t.primaryErrorDeg !== null && t.distanceDeg > 0 ? [t.primaryErrorDeg / t.distanceDeg] : [])),
+  )
+}
+
 /** Hits 50%, speed 30%, first-movement precision 20%. */
 export function flickScore(r: ClickDrillResult): number {
   const s = r.summary
@@ -82,21 +92,6 @@ export function measuredScore(scores: DrillScores, role: Role): number {
   return w.flick * scores.flick + w.micro * scores.micro + w.tracking * scores.tracking
 }
 
-/** Which one the player felt they controlled better. */
-export type Preference = 'A' | 'B' | 'same'
-
-export const MEASURED_WEIGHT = 0.6
-export const FEEL_WEIGHT = 0.4
-
-/** Final score per candidate: measured 60% + feel 40% (preferred = 1, other = 0, same = 0.5 each). */
-export function totalScores(measuredA: number, measuredB: number, pref: Preference): { a: number; b: number } {
-  const feelA = pref === 'A' ? 1 : pref === 'B' ? 0 : 0.5
-  return {
-    a: MEASURED_WEIGHT * measuredA + FEEL_WEIGHT * feelA,
-    b: MEASURED_WEIGHT * measuredB + FEEL_WEIGHT * (1 - feelA),
-  }
-}
-
 export type AimBias = 'over' | 'under' | 'none'
 
 /** Need at least this many attempted flicks before calling a bias. */
@@ -112,47 +107,4 @@ export function flickBias(s: ClickSummary): AimBias {
   if (s.overshootRate >= BIAS_MIN_RATE && s.overshootRate - s.undershootRate >= BIAS_MIN_LEAD) return 'over'
   if (s.undershootRate >= BIAS_MIN_RATE && s.undershootRate - s.overshootRate >= BIAS_MIN_LEAD) return 'under'
   return 'none'
-}
-
-/** Totals closer than this are "close": the over/undershoot signal decides, else it's a tie. */
-export const CLOSE_MARGIN = 0.05
-
-export interface CandidateInput {
-  sens: number
-  run: CandidateRun
-}
-
-export interface Judgement {
-  winner: 'A' | 'B' | 'tie'
-  /** How it was decided. */
-  by: 'score' | 'bias' | 'tie'
-  scores: { a: DrillScores; b: DrillScores }
-  measured: { a: number; b: number }
-  total: { a: number; b: number }
-  bias: { a: AimBias; b: AimBias }
-}
-
-/**
- * Compares A and B. A clear total-score lead wins. When the totals are close, a clear overshoot on
- * the higher sens (too fast) or undershoot on the lower sens (too slow) picks the other one; if
- * neither shows, or both do (conflicting), it's a tie.
- */
-export function judge(a: CandidateInput, b: CandidateInput, pref: Preference, role: Role): Judgement {
-  const scores = { a: drillScores(a.run), b: drillScores(b.run) }
-  const measured = { a: measuredScore(scores.a, role), b: measuredScore(scores.b, role) }
-  const total = totalScores(measured.a, measured.b, pref)
-  const bias = { a: flickBias(a.run.flick.summary), b: flickBias(b.run.flick.summary) }
-  const base = { scores, measured, total, bias }
-
-  const diff = total.a - total.b
-  if (Math.abs(diff) >= CLOSE_MARGIN) return { ...base, winner: diff > 0 ? 'A' : 'B', by: 'score' }
-  if (a.sens === b.sens) return { ...base, winner: 'tie', by: 'tie' }
-
-  const [hi, lo] = a.sens > b.sens ? (['A', 'B'] as const) : (['B', 'A'] as const)
-  const biasOf = (x: 'A' | 'B') => (x === 'A' ? bias.a : bias.b)
-  const hiTooFast = biasOf(hi) === 'over'
-  const loTooSlow = biasOf(lo) === 'under'
-  if (hiTooFast && !loTooSlow) return { ...base, winner: lo, by: 'bias' }
-  if (loTooSlow && !hiTooFast) return { ...base, winner: hi, by: 'bias' }
-  return { ...base, winner: 'tie', by: 'tie' }
 }

@@ -1,7 +1,7 @@
 import type { DrillKind, DrillResult } from './metrics'
-import { applyRound, FINE_PSA, FULL_PSA, initPsa, isDone, planRound, totalRounds, validationSide, type PsaState, type RoundPlan } from './psa'
-import { drillScores, flickBias, judge, type AimBias, type CandidateRun, type DrillScores, type Judgement, type Preference, type Role } from './scoring'
+import { drillScores, flickBias, flickLead, measuredScore, type AimBias, type CandidateRun, type DrillScores, type Role } from './scoring'
 import { defaultSens, roundSens } from './sens'
+import { estimate, FINE_FACTORS, planSweep, WIDE_FACTORS, type CurvePoint, type SweepPoint } from './sweep'
 
 /** The whole test flow as plain data (persisted to localStorage), plus pure transitions. */
 
@@ -9,76 +9,96 @@ export const DRILL_ORDER: DrillKind[] = ['flick', 'micro', 'tracking']
 
 export interface Settings {
   dpi: number
-  /** Sens the player uses now, if given (the starting point). */
+  /** Sens the player uses now, if given (the centre of the first sweep). */
   userSens: number | null
   role: Role
 }
 
 export type PartialRun = Partial<CandidateRun>
 
-export interface RoundRecord {
-  plan: RoundPlan
-  runs: [CandidateRun, CandidateRun]
-  preference: Preference
-  judgement: Judgement
-  baseAfter: number
+/** One finished set: a sensitivity and its three drill results. */
+export interface SetRecord {
+  sens: number
+  run: CandidateRun
 }
 
 export interface Session {
   settings: Settings
-  mode: 'full' | 'fine'
   startSens: number
-  psa: PsaState
-  /** Current round; null once the search is done. */
-  plan: RoundPlan | null
-  /** Drills finished in the current round, per candidate in play order. */
-  runs: [PartialRun, PartialRun]
-  /** Warm-up drills finished (unscored); null when there's no warm-up (fine mode) or it's done. */
+  /** Target seed shared by every scored set, so all sensitivities face the same targets. */
+  seed: number
+  /** 'wide' first, then 'fine' around the estimate (repeated by "ทดสอบเพิ่ม"). */
+  phase: 'wide' | 'fine'
+  /** Sensitivities still to play in this sweep, in play order; [0] is being played. Empty = finished. */
+  queue: number[]
+  /** Drills finished for queue[0]. */
+  current: PartialRun
+  /** Warm-up drills finished (unscored); null once done or when skipped ("ทดสอบเพิ่ม"). */
   warmup: PartialRun | null
-  history: RoundRecord[]
+  /** Whether this run of the test includes a warm-up set (for progress). */
+  hasWarmup: boolean
+  sets: SetRecord[]
+  /** Scored sets planned in total, for progress. */
+  plannedSets: number
 }
 
 export type Step =
   | { stage: 'warmup'; drill: DrillKind; sens: number; seed: number }
-  | { stage: 'round'; candidate: 0 | 1; drill: DrillKind; sens: number; seed: number }
+  | { stage: 'set'; index: number; drill: DrillKind; sens: number; seed: number }
 
 const WARMUP_SEED_MIX = 0x3c6ef372
+const ORDER_SEED_MIX = 0x85ebca6b
 
 export function startSensFor(settings: Settings): number {
   return settings.userSens ?? defaultSens(settings.dpi)
 }
 
-/** Full search from the user's sens (or eDPI 280), with a warm-up first. */
+/** Full search: warm-up, a wide sweep around the user's sens (or eDPI 280), then a fine sweep. */
 export function newSession(settings: Settings, seed: number): Session {
   const startSens = startSensFor(settings)
-  const psa = initPsa(startSens, FULL_PSA)
-  return { settings, mode: 'full', startSens, psa, plan: planRound(psa, seed, 'high'), runs: [{}, {}], warmup: {}, history: [] }
+  return {
+    settings,
+    startSens,
+    seed,
+    phase: 'wide',
+    queue: planSweep(startSens, WIDE_FACTORS, seed ^ ORDER_SEED_MIX),
+    current: {},
+    warmup: {},
+    hasWarmup: true,
+    sets: [],
+    plannedSets: WIDE_FACTORS.length + FINE_FACTORS.length,
+  }
 }
 
-/** "ทดสอบละเอียดต่อ": k = 0.1 from a previous result, no warm-up. */
-export function fineSession(settings: Settings, fromSens: number, seed: number): Session {
-  const psa = initPsa(fromSens, FINE_PSA)
-  return { settings, mode: 'fine', startSens: fromSens, psa, plan: planRound(psa, seed, 'high'), runs: [{}, {}], warmup: null, history: [] }
+/** "ทดสอบเพิ่ม": one more fine sweep around the current result, added to the same data. No warm-up. */
+export function extendSession(s: Session, seed: number): Session {
+  if (!isFinished(s) || s.sets.length === 0) return s
+  return {
+    ...s,
+    phase: 'fine',
+    queue: planSweep(summarizeSession(s).sens, FINE_FACTORS, seed ^ ORDER_SEED_MIX),
+    current: {},
+    warmup: null,
+    hasWarmup: false,
+    plannedSets: s.sets.length + FINE_FACTORS.length,
+  }
 }
 
 const nextDrill = (run: PartialRun): DrillKind | null => DRILL_ORDER.find((k) => !run[k]) ?? null
 
-/** What to play next; null when both candidates are done (time to choose) or the search is over. */
+/** What to play next; null when the search is over. */
 export function currentStep(s: Session): Step | null {
-  if (!s.plan) return null
+  if (s.queue.length === 0) return null
   if (s.warmup) {
     const drill = nextDrill(s.warmup)
-    if (drill) return { stage: 'warmup', drill, sens: s.startSens, seed: s.plan.seed ^ WARMUP_SEED_MIX }
+    if (drill) return { stage: 'warmup', drill, sens: s.startSens, seed: s.seed ^ WARMUP_SEED_MIX }
   }
-  for (const c of [0, 1] as const) {
-    const drill = nextDrill(s.runs[c])
-    if (drill) return { stage: 'round', candidate: c, drill, sens: s.plan.candidates[c].sens, seed: s.plan.seed }
-  }
-  return null
+  const drill = nextDrill(s.current)
+  if (!drill) return null
+  return { stage: 'set', index: s.sets.length, drill, sens: s.queue[0], seed: s.seed }
 }
 
-export const awaitingChoice = (s: Session): boolean => s.plan !== null && currentStep(s) === null
-export const isFinished = (s: Session): boolean => s.plan === null
+export const isFinished = (s: Session): boolean => s.queue.length === 0
 
 /** Records a finished drill for the current step. Ignores a result for the wrong drill. */
 export function recordDrill(s: Session, result: DrillResult): Session {
@@ -88,57 +108,40 @@ export function recordDrill(s: Session, result: DrillResult): Session {
     const warmup = { ...s.warmup, [result.kind]: result }
     return { ...s, warmup: nextDrill(warmup) ? warmup : null }
   }
-  const runs: [PartialRun, PartialRun] = [s.runs[0], s.runs[1]]
-  runs[step.candidate] = { ...runs[step.candidate], [result.kind]: result }
-  return { ...s, runs }
+  const current = { ...s.current, [result.kind]: result }
+  if (nextDrill(current)) return { ...s, current }
+
+  const sets = [...s.sets, { sens: step.sens, run: current as CandidateRun }]
+  const queue = s.queue.slice(1)
+  const next = { ...s, sets, queue, current: {} }
+  if (queue.length > 0 || s.phase !== 'wide') return next
+  // Wide sweep done: zoom in on its estimate.
+  return { ...next, phase: 'fine', queue: planSweep(estimateOf(next).sens, FINE_FACTORS, s.seed ^ ORDER_SEED_MIX ^ sets.length) }
 }
 
-/** Mean overshoot-minus-undershoot of the flick runs in the latest round; null with no history. */
-function recentBiasLead(history: RoundRecord[]): number | null {
-  const last = history[history.length - 1]
-  if (!last) return null
-  const leads = last.runs.map((r) => r.flick.summary.overshootRate - r.flick.summary.undershootRate)
-  return leads.reduce((a, b) => a + b, 0) / leads.length
+/** Score inputs for each finished set. */
+export function sweepPoints(s: Session): SweepPoint[] {
+  return s.sets.map((x) => ({ sens: x.sens, score: measuredScore(drillScores(x.run), s.settings.role), flickLead: flickLead(x.run.flick) }))
 }
 
-/** Sign of the most recent base change that wasn't a tie. */
-function lastMove(history: RoundRecord[]): number {
-  for (let i = history.length - 1; i >= 0; i--) {
-    const d = history[i].baseAfter - history[i].plan.base
-    if (d !== 0) return Math.sign(d)
-  }
-  return 0
-}
-
-/**
- * Applies the player's A/B answer: judges the round, moves the base, and plans the next round
- * (or finishes). Does nothing unless both candidates are complete.
- */
-export function choose(s: Session, pref: Preference, nextSeed: number): Session {
-  if (!awaitingChoice(s) || !s.plan) return s
-  const [a, b] = s.runs as [CandidateRun, CandidateRun]
-  const plan = s.plan
-  const judgement = judge({ sens: plan.candidates[0].sens, run: a }, { sens: plan.candidates[1].sens, run: b }, pref, s.settings.role)
-  const psa = applyRound(s.psa, plan, judgement.winner)
-  const history = [...s.history, { plan, runs: [a, b] as [CandidateRun, CandidateRun], preference: pref, judgement, baseAfter: psa.base }]
-  const next = isDone(psa) ? null : planRound(psa, nextSeed, validationSide(recentBiasLead(history), lastMove(history), nextSeed))
-  return { ...s, psa, plan: next, runs: [{}, {}], history }
-}
+const estimateOf = (s: Session) => estimate(sweepPoints(s))
 
 // --- Progress / time ----------------------------------------------------------------------------
 
-/** Rough wall time per drill including the intro and countdown, seconds. */
-export const DRILL_EST_S: Record<DrillKind, number> = { flick: 25, micro: 20, tracking: 27 }
-export const CHOICE_EST_S = 10
-const SET_EST_S = DRILL_ORDER.reduce((t, k) => t + DRILL_EST_S[k], 0)
+/** Rough play time per drill, seconds. The three drills of a set run back to back. */
+export const DRILL_EST_S: Record<DrillKind, number> = { flick: 8, micro: 5, tracking: 6 }
+/** Intro click and 3-2-1 countdown, once at the start of each set. */
+export const SET_OVERHEAD_S = 5
+const SET_EST_S = SET_OVERHEAD_S + DRILL_ORDER.reduce((t, k) => t + DRILL_EST_S[k], 0)
 
 const doneDrills = (run: PartialRun | null) => (run ? DRILL_ORDER.filter((k) => run[k]).length : 0)
-const remainingIn = (run: PartialRun) => DRILL_ORDER.filter((k) => !run[k]).reduce((t, k) => t + DRILL_EST_S[k], 0)
+const remainingIn = (run: PartialRun) =>
+  (doneDrills(run) === 0 ? SET_OVERHEAD_S : 0) + DRILL_ORDER.filter((k) => !run[k]).reduce((t, k) => t + DRILL_EST_S[k], 0)
 
 export interface Progress {
-  /** 1-based current round (capped at the total once done). */
-  round: number
-  totalRounds: number
+  /** 1-based current set (capped at the total once done). */
+  set: number
+  totalSets: number
   /** Drills done / total (warm-up included), for the progress bar. */
   drillsDone: number
   drillsTotal: number
@@ -147,38 +150,39 @@ export interface Progress {
 }
 
 export function progress(s: Session): Progress {
-  const rounds = totalRounds(s.psa.config)
-  const hasWarmup = s.mode === 'full'
-  const perRound = 2 * DRILL_ORDER.length
-  const drillsTotal = (hasWarmup ? DRILL_ORDER.length : 0) + rounds * perRound
-  const warmupDone = hasWarmup ? (s.warmup ? doneDrills(s.warmup) : DRILL_ORDER.length) : 0
-  const roundDone = s.plan ? doneDrills(s.runs[0]) + doneDrills(s.runs[1]) : 0
-  const drillsDone = warmupDone + s.history.length * perRound + roundDone
+  const n = DRILL_ORDER.length
+  const warmupDone = s.warmup ? doneDrills(s.warmup) : s.hasWarmup ? n : 0
+  const drillsTotal = (s.hasWarmup ? n : 0) + s.plannedSets * n
+  const drillsDone = warmupDone + s.sets.length * n + (isFinished(s) ? 0 : doneDrills(s.current))
 
   let remainingS = 0
-  if (s.warmup) remainingS += remainingIn(s.warmup)
-  if (s.plan) {
-    remainingS += remainingIn(s.runs[0]) + remainingIn(s.runs[1]) + CHOICE_EST_S
-    remainingS += (rounds - s.history.length - 1) * (2 * SET_EST_S + CHOICE_EST_S)
+  if (!isFinished(s)) {
+    if (s.warmup) remainingS += remainingIn(s.warmup)
+    remainingS += remainingIn(s.current) + Math.max(0, s.plannedSets - s.sets.length - 1) * SET_EST_S
   }
-  return { round: Math.min(s.history.length + 1, rounds), totalRounds: rounds, drillsDone, drillsTotal, remainingS }
+  return { set: Math.min(s.sets.length + 1, s.plannedSets), totalSets: s.plannedSets, drillsDone, drillsTotal, remainingS }
 }
 
 /** Estimated length of a full session before it starts, seconds. */
-export const FULL_SESSION_EST_S = SET_EST_S + totalRounds(FULL_PSA) * (2 * SET_EST_S + CHOICE_EST_S)
+export const FULL_SESSION_EST_S = SET_EST_S * (1 + WIDE_FACTORS.length + FINE_FACTORS.length)
 
 // --- Results ------------------------------------------------------------------------------------
 
-/** Suggested manual-tweak range around the result. */
-export const RANGE_PCT = 0.03
-
 export interface SessionSummary {
   sens: number
+  /** Near-best range from the score curve, in the 3-decimal values the user can enter. */
   range: [number, number]
-  /** Mean per-drill scores over every scored run; null with no rounds. */
+  /** Smoothed score curve and the raw scored sets, for the chart. */
+  curve: CurvePoint[]
+  points: SweepPoint[]
+  /** Where flicks neither over- nor undershoot; null when unclear. */
+  balanceSens: number | null
+  /** Lowest and highest sensitivity tested. */
+  tested: [number, number]
+  /** Mean per-drill scores over every scored set; null with no sets. */
   profile: DrillScores | null
   /**
-   * How often a clear flick bias showed, also split by runs faster / slower than the result.
+   * How often a clear flick bias showed, also split by sets faster / slower than the result.
    * Overshooting when faster and undershooting when slower is the pattern that confirms the result.
    */
   bias: {
@@ -190,19 +194,27 @@ export interface SessionSummary {
   }
 }
 
+/** @throws RangeError before any set is finished */
 export function summarizeSession(s: Session): SessionSummary {
-  const sens = s.psa.base
-  const runs = s.history.flatMap((r) => r.runs.map((run, i) => ({ sens: r.plan.candidates[i].sens, run })))
-  const scores = runs.map((r) => drillScores(r.run))
+  const points = sweepPoints(s)
+  const e = estimate(points)
+  const sens = e.sens
+  const scores = s.sets.map((x) => drillScores(x.run))
   const avg = (k: keyof DrillScores) => scores.reduce((t, x) => t + x[k], 0) / scores.length
-  const biases: { sens: number; bias: AimBias }[] = runs.map((r) => ({ sens: r.sens, bias: flickBias(r.run.flick.summary) }))
+  const biases: { sens: number; bias: AimBias }[] = s.sets.map((x) => ({ sens: x.sens, bias: flickBias(x.run.flick.summary) }))
+  // Round to what the game accepts, and make sure the shown result sits inside the shown range.
+  const shown = roundSens(sens)
+  const range: [number, number] = [Math.min(shown, roundSens(e.range[0])), Math.max(shown, roundSens(e.range[1]))]
   return {
     sens,
-    // From the 3-decimal value the user is shown, so the range matches it exactly.
-    range: [roundSens(sens) * (1 - RANGE_PCT), roundSens(sens) * (1 + RANGE_PCT)],
+    range,
+    curve: e.curve,
+    points,
+    balanceSens: e.balanceSens,
+    tested: e.tested,
     profile: scores.length ? { flick: avg('flick'), micro: avg('micro'), tracking: avg('tracking') } : null,
     bias: {
-      runs: runs.length,
+      runs: biases.length,
       over: biases.filter((b) => b.bias === 'over').length,
       under: biases.filter((b) => b.bias === 'under').length,
       overWhenFaster: biases.filter((b) => b.bias === 'over' && b.sens > sens).length,

@@ -1,9 +1,10 @@
-import { CLOSE_MARGIN, type DrillScores } from './scoring'
-import { summarizeSession, type Session } from './session'
+import type { DrillScores } from './scoring'
+import type { CurvePoint } from './sweep'
+import { summarizeSession, type Session, type SessionSummary } from './session'
 
 /** Plain-language findings for the results page. */
 export interface Insight {
-  id: 'bias' | 'profile' | 'feel'
+  id: 'bias' | 'profile' | 'confidence'
   tone: 'good' | 'warn' | 'info'
   text: string
 }
@@ -16,13 +17,13 @@ export const DRILL_NAMES: Record<keyof DrillScores, string> = {
 
 /** A bias needs to show on at least this many runs on one side to be reported. */
 const BIAS_MIN_RUNS = 2
-/** Answered rounds with a clear measured winner needed before judging the player's feel. */
-export const FEEL_MIN_ROUNDS = 3
+/** The score curve must fall at least this share of its peak on both sides for a clear result. */
+export const CLEAR_DROP = 0.1
 /** Drill scores closer than this count as even. */
 const PROFILE_SPREAD = 0.1
 
-export function biasInsight(s: Session): Insight {
-  const b = summarizeSession(s).bias
+export function biasInsight(sum: SessionSummary): Insight {
+  const b = sum.bias
   const fast = b.overWhenFaster >= BIAS_MIN_RUNS
   const slow = b.underWhenSlower >= BIAS_MIN_RUNS
   if (fast && slow)
@@ -36,33 +37,53 @@ export function biasInsight(s: Session): Insight {
   return { id: 'bias', tone: 'good', text: 'การหยุดที่เป้าของคุณสมดุลดี ไม่หมุนเลยหรือขาดเป้าอย่างชัดเจน' }
 }
 
-export function profileInsight(profile: DrillScores | null): Insight | null {
-  if (!profile) return null
+/** Strongest and weakest drill; `even` when they are closer than PROFILE_SPREAD. */
+export function drillProfile(profile: DrillScores): { best: keyof DrillScores; worst: keyof DrillScores; even: boolean } {
   const keys = Object.keys(profile) as (keyof DrillScores)[]
   const best = keys.reduce((a, b) => (profile[b] > profile[a] ? b : a))
   const worst = keys.reduce((a, b) => (profile[b] < profile[a] ? b : a))
-  if (profile[best] - profile[worst] < PROFILE_SPREAD) return { id: 'profile', tone: 'info', text: 'ฝีมือทั้ง 3 ด้านของคุณใกล้เคียงกัน ไม่มีจุดอ่อนชัดเจน' }
+  return { best, worst, even: profile[best] - profile[worst] < PROFILE_SPREAD }
+}
+
+export function profileInsight(profile: DrillScores | null): Insight | null {
+  if (!profile) return null
+  const { best, worst, even } = drillProfile(profile)
+  if (even) return { id: 'profile', tone: 'info', text: 'ฝีมือทั้ง 3 ด้านของคุณใกล้เคียงกัน ไม่มีจุดอ่อนชัดเจน' }
   return { id: 'profile', tone: 'info', text: `จุดแข็งของคุณคือ${DRILL_NAMES[best]} ส่วน${DRILL_NAMES[worst]}ยังฝึกเพิ่มได้อีก` }
 }
 
+/** How far the score curve falls from its peak on each side, as a share of the peak. */
+export function peakDrops(curve: readonly CurvePoint[]): { left: number; right: number } {
+  if (curve.length === 0) return { left: 0, right: 0 }
+  let peak = 0
+  for (let i = 1; i < curve.length; i++) if (curve[i].score > curve[peak].score) peak = i
+  const top = curve[peak].score
+  if (top <= 0) return { left: 0, right: 0 }
+  const low = (xs: readonly CurvePoint[]) => Math.min(top, ...xs.map((p) => p.score))
+  return { left: (top - low(curve.slice(0, peak))) / top, right: (top - low(curve.slice(peak + 1))) / top }
+}
+
 /**
- * How often the player's A/B answer matched the measured winner. Rounds answered "same", or where
- * the measured scores were closer than CLOSE_MARGIN, say nothing either way and are skipped.
+ * How sharp the result is. Clear when the score curve rises to a peak and falls away on both
+ * sides; a flat curve, or a best value at the edge of what was tested, means more sets would help.
+ * (The near-best range itself is not the test: around a real peak scores are close by nature, so
+ * the range stays a few tenths wide however many sets are played.)
  */
-export function feelInsight(s: Session): Insight | null {
-  if (s.history.length === 0) return null
-  const answered = s.history.filter((r) => r.preference !== 'same')
-  if (answered.length === 0) return { id: 'feel', tone: 'info', text: 'คุณตอบ "พอๆ กัน" ทุกรอบ ผลนี้จึงมาจากการวัดจริงเป็นหลัก' }
-  const decisive = answered.filter((r) => Math.abs(r.judgement.measured.a - r.judgement.measured.b) >= CLOSE_MARGIN)
-  if (decisive.length < FEEL_MIN_ROUNDS)
-    return { id: 'feel', tone: 'info', text: 'ผลวัดของเซนส์ที่เทียบกันใกล้กันมาก ความรู้สึกของคุณจึงช่วยตัดสินในหลายรอบ' }
-  const agree = decisive.filter((r) => (r.judgement.measured.a > r.judgement.measured.b ? 'A' : 'B') === r.preference).length
-  const tone = agree * 2 > decisive.length ? 'good' : 'warn'
-  const tail = tone === 'good' ? 'ความรู้สึกมือของคุณเชื่อถือได้' : 'ลองใช้ค่านี้สักพัก ความรู้สึกอาจตามผลวัดมาเอง'
-  return { id: 'feel', tone, text: `ความรู้สึกของคุณตรงกับผลวัดจริง ${agree} จาก ${decisive.length} รอบที่ผลวัดต่างกันชัด · ${tail}` }
+export function confidenceInsight(sum: SessionSummary): Insight {
+  const [lo, hi] = sum.range
+  const [tLo, tHi] = sum.tested
+  const atEdge = sum.sens <= tLo * 1.01 || sum.sens >= tHi * 0.99
+  if (atEdge)
+    return { id: 'confidence', tone: 'warn', text: 'ค่าที่ดีที่สุดอยู่ที่ขอบของช่วงที่ทดสอบ กด "ทดสอบเพิ่ม" เพื่อเช็กค่าที่ไกลกว่านี้' }
+  const { left, right } = peakDrops(sum.curve)
+  if (Math.min(left, right) >= CLEAR_DROP)
+    return { id: 'confidence', tone: 'good', text: `ผลชัดเจน คะแนนของคุณสูงสุดตรงกลางแล้วลดลงทั้งสองข้าง ค่าในช่วง ${lo.toFixed(3)}–${hi.toFixed(3)} ใช้ได้ดีพอกัน` }
+  if (Math.max(left, right) < CLEAR_DROP)
+    return { id: 'confidence', tone: 'warn', text: 'คะแนนในทุกค่าที่ทดสอบใกล้กันมาก ยังชี้ค่าที่ดีที่สุดได้ไม่ชัด กด "ทดสอบเพิ่ม" เพื่อให้ผลแม่นขึ้น' }
+  return { id: 'confidence', tone: 'warn', text: 'คะแนนยังไม่ลดลงชัดเจนทั้งสองข้างของค่านี้ กด "ทดสอบเพิ่ม" เพื่อให้ผลแม่นขึ้น' }
 }
 
 export function buildInsights(s: Session): Insight[] {
-  const profile = summarizeSession(s).profile
-  return [biasInsight(s), profileInsight(profile), feelInsight(s)].filter((x): x is Insight => x !== null)
+  const sum = summarizeSession(s)
+  return [confidenceInsight(sum), biasInsight(sum), profileInsight(sum.profile)].filter((x): x is Insight => x !== null)
 }

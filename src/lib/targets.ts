@@ -17,9 +17,9 @@ export interface ClickDrillConfig {
 }
 
 /** Flick: head-sized target 15°–90° away, mostly horizontal with some vertical. */
-export const FLICK: ClickDrillConfig = { count: 12, minDeg: 15, maxDeg: 90, radiusDeg: 1.2, timeoutS: 3 }
+export const FLICK: ClickDrillConfig = { count: 6, minDeg: 15, maxDeg: 90, radiusDeg: 1.2, timeoutS: 3 }
 /** Micro-adjust: small target 2°–8° from the crosshair, any direction. */
-export const MICRO: ClickDrillConfig = { count: 15, minDeg: 2, maxDeg: 8, radiusDeg: 0.5, timeoutS: 2.5 }
+export const MICRO: ClickDrillConfig = { count: 5, minDeg: 2, maxDeg: 8, radiusDeg: 0.5, timeoutS: 2.5 }
 
 /** Largest vertical component of a flick offset, in degrees. */
 const FLICK_MAX_VERTICAL = 20
@@ -70,7 +70,7 @@ export function placeTarget(look: LookAngles, offset: Offset): LookAngles {
 export const AGENT_SPEED = 6.75
 
 export const TRACKING = {
-  durationS: 20,
+  durationS: 6,
   /** Angular strafe speed at TARGET_DISTANCE (≈29.4°/s). */
   speedDegPerS: toDeg(Math.atan(AGENT_SPEED / TARGET_DISTANCE)),
   /** Target stays within ±rangeDeg of the starting yaw, bouncing at the edges. */

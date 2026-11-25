@@ -2,14 +2,13 @@ import { motion } from 'framer-motion'
 import { toPng } from 'html-to-image'
 import { CheckCircle2, Copy, Crosshair, ImageDown, Info, RotateCcw, TriangleAlert, type LucideIcon } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { CartesianGrid, Line, LineChart, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
+import { CartesianGrid, ComposedChart, Line, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ReferenceArea, ReferenceLine, ResponsiveContainer, Scatter, Tooltip, XAxis, YAxis } from 'recharts'
 import { ShareCard } from '@/components/ShareCard'
 import { useToast } from '@/components/Toast'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
 import { HelpTip } from '@/components/ui/tooltip'
-import { buildInsights, DRILL_NAMES, type Insight } from '@/lib/insights'
-import type { DrillScores } from '@/lib/scoring'
+import { buildInsights, DRILL_NAMES, drillProfile, type Insight } from '@/lib/insights'
 import { niceTicks } from '@/lib/niceTicks'
 import { summarizeSession, type Session } from '@/lib/session'
 import { cmPer360, edpi, roundSens } from '@/lib/sens'
@@ -43,34 +42,22 @@ function useCountUp(target: number): number {
 
 /** Chart colours per theme (recharts needs concrete colours, not CSS variables). */
 const CHART: Record<Theme, { accent: string; good: string; muted: string; dot: string; grid: string; fg: string; card: string; border: string }> = {
-  dark: { accent: '#FF4655', good: '#3DDC97', muted: '#8A93A3', dot: 'rgba(138,147,163,0.5)', grid: 'rgba(255,255,255,0.05)', fg: '#F5F7FA', card: '#171A21', border: 'rgba(255,255,255,0.12)' },
+  dark: { accent: '#FF4655', good: '#3DDC97', muted: '#8A93A3', dot: 'rgba(200,206,216,0.85)', grid: 'rgba(255,255,255,0.05)', fg: '#F5F7FA', card: '#171A21', border: 'rgba(255,255,255,0.12)' },
   light: { accent: '#E0323F', good: '#0F7F52', muted: '#5B6472', dot: 'rgba(91,100,114,0.45)', grid: 'rgba(11,13,16,0.06)', fg: '#0B0D10', card: '#FFFFFF', border: 'rgba(11,13,16,0.16)' },
 }
 
 const fmt = (x: number) => roundSens(x).toFixed(3)
 
-interface RoundRow {
-  name: string
-  lo: number
-  hi: number
-  base: number
-  /** Winning sens, null on a tie. */
-  winner: number | null
+/** Chart rows: the smoothed curve and the scored sets, scores as 0–100. */
+function chartData(curve: { sens: number; score: number }[], points: { sens: number; score: number }[]) {
+  return {
+    curve: curve.map((p) => ({ sens: p.sens, curve: p.score * 100 })),
+    points: points.map((p) => ({ sens: p.sens, score: Math.round(p.score * 100) })),
+  }
 }
 
-function roundRows(s: Session): RoundRow[] {
-  return s.history.map((r, i) => {
-    const [lo, hi] = [...r.plan.candidates].sort((a, b) => a.sens - b.sens)
-    const w = r.judgement.winner
-    return {
-      name: r.plan.kind === 'validation' ? 'ยืนยัน' : `รอบ ${i + 1}`,
-      lo: roundSens(lo.sens),
-      hi: roundSens(hi.sens),
-      base: roundSens(r.baseAfter),
-      winner: w === 'tie' ? null : roundSens(r.plan.candidates[w === 'A' ? 0 : 1].sens),
-    }
-  })
-}
+/** X-axis padding factor past the lowest / highest sens tested. */
+const X_PAD = 1.06
 
 const fadeUp = (i: number) => ({
   initial: { opacity: 0, y: 10 },
@@ -80,18 +67,17 @@ const fadeUp = (i: number) => ({
 
 /** `session` comes from App so the page keeps its last session while fading out after a reset. */
 export function Results({ session }: { session: Session }) {
-  const fineTune = useSessionStore((s) => s.fineTune)
+  const extend = useSessionStore((s) => s.extend)
   const reset = useSessionStore((s) => s.reset)
   const theme = useSessionStore((s) => s.theme)
   const c = CHART[theme]
 
   const summary = useMemo(() => summarizeSession(session), [session])
   const insights = useMemo(() => buildInsights(session), [session])
-  const rows = useMemo(() => roundRows(session), [session])
-  const yAxis = useMemo(() => {
-    const values = rows.flatMap((r) => [r.lo, r.hi, r.base])
-    return niceTicks(Math.min(...values), Math.max(...values))
-  }, [rows])
+  const chart = useMemo(() => chartData(summary.curve, summary.points), [summary])
+  const xAxis = useMemo(() => niceTicks(summary.tested[0], summary.tested[1]), [summary])
+  // A little room past the outermost sets (on the log scale) so their dots aren't cut in half.
+  const xDomain: [number, number] = [summary.tested[0] / X_PAD, summary.tested[1] * X_PAD]
   const sens = roundSens(summary.sens)
   const shown = useCountUp(sens)
   const dpi = session.settings.dpi
@@ -140,8 +126,7 @@ export function Results({ session }: { session: Session }) {
 
   const strengths = useMemo(() => {
     if (!profile) return null
-    const order = (Object.keys(profile) as (keyof DrillScores)[]).sort((a, b) => profile[b] - profile[a])
-    return { best: order[0], worst: order[order.length - 1] }
+    return drillProfile(profile)
   }, [profile])
 
   const tooltipStyle ={ background: c.card, border: `1px solid ${c.border}`, borderRadius: 8, color: c.fg, fontSize: 12 }
@@ -151,7 +136,7 @@ export function Results({ session }: { session: Session }) {
       <div className="mx-auto max-w-220">
         <section className="text-center">
           <motion.p {...fadeUp(0)} className="text-base text-muted">
-            เซนส์ที่แนะนำใน Valorant{session.mode === 'fine' && ' (ทดสอบละเอียด)'}
+            เซนส์ที่แนะนำใน Valorant · จาก {summary.points.length} ชุด
           </motion.p>
           <div className="mt-2 flex items-center justify-center gap-2">
             <div
@@ -175,7 +160,7 @@ export function Results({ session }: { session: Session }) {
         <section className="mt-12 grid gap-4 sm:grid-cols-3">
           <Stat i={2} label="eDPI" help="DPI × เซนส์ ใช้เทียบความไวกับคนที่ใช้ DPI ต่างกัน" value={Math.round(edpiValue).toString()} testId="stat-edpi" />
           <Stat i={3} label="cm/360" help="ระยะที่ต้องลากเมาส์เพื่อหมุนตัวครบ 1 รอบ" value={`${cm360.toFixed(1)} cm`} testId="stat-cm360" />
-          <Stat i={4} label="ช่วงแนะนำ" help="ถ้าอยากปรับเอง ให้อยู่ในช่วงนี้ (±3%)" value={`${fmt(summary.range[0])} – ${fmt(summary.range[1])}`} testId="stat-range" />
+          <Stat i={4} label="ช่วงแนะนำ" help="ช่วงที่คะแนนของคุณไม่ต่ำกว่า 97% ของค่าที่ดีที่สุด ถ้าอยากปรับเอง ให้อยู่ในช่วงนี้" value={`${fmt(summary.range[0])} – ${fmt(summary.range[1])}`} testId="stat-range" />
         </section>
 
         <motion.section {...fadeUp(5)} className="mt-12">
@@ -189,63 +174,52 @@ export function Results({ session }: { session: Session }) {
 
         <motion.section {...fadeUp(6)} className="mt-12 grid gap-4 md:grid-cols-2">
           <Card>
-            <h2 className="font-semibold">การบีบช่วงเซนส์</h2>
+            <h2 className="font-semibold">คะแนนในแต่ละค่าเซนส์</h2>
             <p className="mt-1 mb-4 text-xs text-muted">
-              จุด<span className="font-medium text-good">เขียว</span> = ค่าที่ชนะ · จุดเทา = ค่าที่แพ้ · เส้น<span className="font-medium text-accent-text">แดง</span> = ค่ากลางหลังจบรอบ
+              จุด = คะแนนแต่ละชุด · เส้น<span className="font-medium text-accent-text">แดง</span> = แนวโน้ม · แถบ<span className="font-medium text-good">เขียว</span> = ช่วงแนะนำ · เส้นประ<span className="font-medium text-good">เขียว</span> = ค่าแนะนำ
             </p>
-            <div className="h-60" data-testid="rounds-chart">
+            <div className="h-60" data-testid="score-chart">
               <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: -8 }}>
+                <ComposedChart margin={{ top: 8, right: 8, bottom: 0, left: -16 }}>
                   <CartesianGrid stroke={c.grid} vertical={false} />
-                  <XAxis dataKey="name" tick={{ fill: c.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
-                  <YAxis
-                    domain={yAxis.ticks.length ? [yAxis.ticks[0], yAxis.ticks[yAxis.ticks.length - 1]] : ['auto', 'auto']}
-                    ticks={yAxis.ticks}
+                  <XAxis
+                    dataKey="sens"
+                    type="number"
+                    scale="log"
+                    domain={xDomain}
+                    ticks={xAxis.ticks.filter((t) => t >= xDomain[0] && t <= xDomain[1])}
                     interval={0}
+                    allowDataOverflow
                     tick={{ fill: c.muted, fontSize: 11 }}
                     axisLine={false}
                     tickLine={false}
-                    tickFormatter={(v: number) => v.toFixed(yAxis.decimals)}
+                    tickFormatter={(v: number) => v.toFixed(xAxis.decimals)}
                   />
+                  <YAxis domain={[0, 100]} ticks={[0, 25, 50, 75, 100]} tick={{ fill: c.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <ReferenceArea x1={summary.range[0]} x2={summary.range[1]} fill={c.good} fillOpacity={0.14} stroke="none" ifOverflow="hidden" />
+                  <ReferenceLine x={summary.sens} stroke={c.good} strokeDasharray="3 3" ifOverflow="hidden" />
                   <Tooltip
                     contentStyle={tooltipStyle}
                     labelStyle={{ color: c.fg }}
                     itemStyle={{ color: c.fg }}
                     cursor={{ stroke: c.border }}
-                    formatter={(v) => (typeof v === 'number' ? v.toFixed(3) : String(v))}
+                    labelFormatter={(v) => `เซนส์ ${typeof v === 'number' ? v.toFixed(3) : String(v)}`}
+                    formatter={(v) => (typeof v === 'number' ? Math.round(v).toString() : String(v))}
                   />
-                  <Line dataKey="base" name="ค่ากลาง" stroke={c.accent} strokeWidth={2} dot={false} isAnimationActive={false} />
-                  {(['lo', 'hi'] as const).map((k) => (
-                    <Line
-                      key={k}
-                      dataKey={k}
-                      name={k === 'lo' ? 'ต่ำ' : 'สูง'}
-                      stroke="none"
-                      isAnimationActive={false}
-                      activeDot={false}
-                      dot={(p: { cx?: number; cy?: number; index?: number; payload?: RoundRow }) => {
-                        const won = p.payload !== undefined && p.payload.winner === p.payload[k]
-                        return <circle key={`${k}-${p.index}`} cx={p.cx} cy={p.cy} r={won ? 5 : 4} fill={won ? c.good : c.dot} />
-                      }}
-                    />
-                  ))}
-                </LineChart>
+                  <Line data={chart.curve} dataKey="curve" name="แนวโน้ม" stroke={c.accent} strokeWidth={2} dot={false} activeDot={false} isAnimationActive={false} />
+                  <Scatter data={chart.points} dataKey="score" name="คะแนน" fill={c.dot} isAnimationActive={false} />
+                </ComposedChart>
               </ResponsiveContainer>
             </div>
-            <ul data-testid="rounds-list" className="mt-4 space-y-0.5 text-xs text-muted tabular-nums">
-              {rows.map((r, i) => (
-                <li key={i}>
-                  {r.name}: {r.lo.toFixed(3)} vs {r.hi.toFixed(3)} →{' '}
-                  {r.winner === null ? <span>เสมอ คงค่าเดิม {r.base.toFixed(3)}</span> : <b className="text-good">{r.winner.toFixed(3)}</b>}
-                </li>
-              ))}
-            </ul>
+            <p data-testid="sets-summary" className="mt-4 text-xs text-muted tabular-nums">
+              ทดสอบ {summary.points.length} ชุด ตั้งแต่ {fmt(summary.tested[0])} ถึง {fmt(summary.tested[1])} · คะแนนดีที่สุดใกล้ {fmt(summary.sens)}
+            </p>
           </Card>
 
           <Card className="flex flex-col">
             <h2 className="font-semibold">จุดแข็ง / จุดอ่อน</h2>
-            <p className="mt-1 mb-4 text-xs text-muted">คะแนนเฉลี่ยทุกรอบ (0–100)</p>
-            {/* Grows with the round chart beside it, so the radar sits centred instead of leaving a gap. */}
+            <p className="mt-1 mb-4 text-xs text-muted">คะแนนเฉลี่ยทุกชุด (0–100)</p>
+            {/* Grows with the score chart beside it, so the radar sits centred instead of leaving a gap. */}
             <div className="min-h-64 flex-1" data-testid="radar-chart">
               <ResponsiveContainer width="100%" height="100%">
                 <RadarChart data={radar} outerRadius="72%">
@@ -257,14 +231,19 @@ export function Results({ session }: { session: Session }) {
                 </RadarChart>
               </ResponsiveContainer>
             </div>
-            {strengths && (
-              <dl data-testid="strengths" className="mt-4 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
-                <dt className="text-muted">ถนัดที่สุด</dt>
-                <dd className="font-medium text-good">{DRILL_NAMES[strengths.best]}</dd>
-                <dt className="text-muted">ควรฝึกเพิ่ม</dt>
-                <dd className="font-medium">{DRILL_NAMES[strengths.worst]}</dd>
-              </dl>
-            )}
+            {strengths &&
+              (strengths.even ? (
+                <p data-testid="strengths" className="mt-4 text-sm text-muted">
+                  ทั้ง 3 ด้านใกล้เคียงกัน ไม่มีจุดอ่อนชัดเจน
+                </p>
+              ) : (
+                <dl data-testid="strengths" className="mt-4 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+                  <dt className="text-muted">ถนัดที่สุด</dt>
+                  <dd className="font-medium text-good">{DRILL_NAMES[strengths.best]}</dd>
+                  <dt className="text-muted">ควรฝึกเพิ่ม</dt>
+                  <dd className="font-medium">{DRILL_NAMES[strengths.worst]}</dd>
+                </dl>
+              ))}
           </Card>
         </motion.section>
 
@@ -279,8 +258,8 @@ export function Results({ session }: { session: Session }) {
         </motion.div>
 
         <motion.section {...fadeUp(8)} className="mt-6 grid gap-3 sm:grid-cols-3">
-          <Button data-testid="fine-tune-button" variant="secondary" onClick={fineTune}>
-            <Crosshair className="size-4" strokeWidth={1.75} aria-hidden /> ทดสอบละเอียดต่อ
+          <Button data-testid="extend-button" variant="secondary" onClick={extend}>
+            <Crosshair className="size-4" strokeWidth={1.75} aria-hidden /> ทดสอบเพิ่มให้แม่นขึ้น
           </Button>
           <Button data-testid="share-button" variant="secondary" disabled={sharing} onClick={() => void saveImage()}>
             <ImageDown className="size-4" strokeWidth={1.75} aria-hidden /> {sharing ? 'กำลังสร้างรูป…' : 'บันทึกรูปไว้แชร์'}

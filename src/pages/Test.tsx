@@ -1,7 +1,6 @@
 import { motion } from 'framer-motion'
 import { LogOut, Play, RotateCcw, Volume2, VolumeX } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ABChoice } from '../components/ABChoice'
 import { Crosshair } from '../components/Crosshair'
 import { HitMarker } from '../components/HitMarker'
 import { Hud, RoundDots } from '../components/Hud'
@@ -16,9 +15,9 @@ import { lockErrorMessage } from '../hooks/pointerLock'
 import { usePointerLock, type RawInputStatus } from '../hooks/usePointerLock'
 import { fakeRun } from '../lib/fakeResults'
 import { applyInput, newTracker, type LookTracker } from '../lib/look'
+import { onLockChange, type Stage } from '../lib/lockStart'
 import type { DrillKind, DrillResult } from '../lib/metrics'
-import type { CandidateRun } from '../lib/scoring'
-import { currentStep, progress, type Session, type Step } from '../lib/session'
+import { currentStep, DRILL_EST_S, DRILL_ORDER, progress, type Session, type Step } from '../lib/session'
 import { playHit, playMiss } from '../lib/sound'
 import { TRACKING } from '../lib/targets'
 import { cn, minutesText, radioKeyDown } from '../lib/utils'
@@ -44,7 +43,6 @@ declare global {
   }
 }
 
-type Stage = 'intro' | 'countdown' | 'playing'
 
 const HIT_MARKER_MS = 120
 const COUNTDOWN_FROM = 3
@@ -54,14 +52,18 @@ const FPS_WARN_RATIO = 0.9
 const FPS_WARN_AFTER_MS = 2000
 
 const DRILL_INFO: Record<DrillKind, { name: string; how: string }> = {
-  flick: { name: 'Flick', how: 'เป้าจะโผล่ห่างจากเป้าเล็ง หมุนไปยิงให้เร็วและแม่นที่สุด' },
-  micro: { name: 'Micro-adjust', how: 'เป้าเล็กอยู่ใกล้เป้าเล็ง ขยับนิดเดียวแล้วยิงให้โดน' },
-  tracking: { name: 'Tracking', how: 'เป้าเดินซ้ายขวา เล็งตามให้อยู่บนตัวเป้าตลอด ไม่ต้องคลิก' },
+  flick: { name: 'Flick', how: 'เป้าโผล่ไกล หมุนไปยิงให้เร็วและแม่น' },
+  micro: { name: 'Micro', how: 'เป้าเล็กใกล้เป้าเล็ง ขยับนิดเดียวแล้วยิง' },
+  tracking: { name: 'Tracking', how: 'เป้าเดินซ้ายขวา เล็งตามไว้ ไม่ต้องคลิก' },
 }
 
-const COLOR_NAMES: Record<string, string> = { '#3DDC97': 'เขียว', '#F5F7FA': 'ขาว', '#FFE14D': 'เหลือง', '#4DD8FF': 'ฟ้า', '#FF5CE1': 'ชมพู' }
+/** Play time of one set (three drills back to back), rounded for the intro text. */
+const SET_PLAY_S = Math.round(DRILL_ORDER.reduce((t, k) => t + DRILL_EST_S[k], 0) / 5) * 5
 
-const labelOf =(c: 0 | 1) => (c === 0 ? 'A' : 'B')
+/** Later drills of a set follow straight on; only a set's first drill gets an intro and countdown. */
+const startsSet = (step: Step) => step.drill === DRILL_ORDER[0]
+
+const COLOR_NAMES: Record<string, string> = { '#3DDC97': 'เขียว', '#F5F7FA': 'ขาว', '#FFE14D': 'เหลือง', '#4DD8FF': 'ฟ้า', '#FF5CE1': 'ชมพู' }
 
 /** Overlay card pop-in; only shown between drills, never while aiming. */
 const cardIn = {
@@ -97,7 +99,6 @@ function useRefreshRate(onMeasured: (hz: number) => void, enabled: boolean) {
 /** `session` comes from App so the page keeps its last session while fading out after a reset. */
 export function Test({ session }: { session: Session }) {
   const recordDrill = useSessionStore((s) => s.recordDrill)
-  const choose = useSessionStore((s) => s.choose)
   const exitToSetup = useSessionStore((s) => s.exitToSetup)
   const soundOn = useSessionStore((s) => s.soundOn)
   const setSound = useSessionStore((s) => s.setSound)
@@ -109,7 +110,6 @@ export function Test({ session }: { session: Session }) {
 
   const step = currentStep(session)
   const prog = progress(session)
-  const choosing = step === null && session.plan !== null
 
   const containerRef = useRef<HTMLDivElement>(null)
   const fpsRef = useRef<HTMLSpanElement>(null)
@@ -118,11 +118,16 @@ export function Test({ session }: { session: Session }) {
   const pointer = usePointerLock(containerRef)
 
   // Stage and restart count belong to one step; a new step starts at its intro.
-  const stepKey = step ? `${session.plan!.index}-${step.stage}-${step.stage === 'round' ? step.candidate : 'w'}-${step.drill}` : 'choice'
+  const stepKey = step ? `${step.stage}-${step.stage === 'set' ? step.index : 'w'}-${step.drill}` : 'done'
   const [stageState, setStageState] = useState({ key: stepKey, stage: 'intro' as Stage, attempt: 0 })
   const fresh = stageState.key === stepKey
-  const stage: Stage = fresh ? stageState.stage : 'intro'
+  const chained = step !== null && !startsSet(step) && pointer.locked
+  const stage: Stage = fresh ? stageState.stage : chained ? 'playing' : 'intro'
   const attempt = fresh ? stageState.attempt : 0
+  // Commit the derived first stage, so pausing a chained drill shows the pause menu, not an intro.
+  useEffect(() => {
+    if (!fresh) setStageState({ key: stepKey, stage, attempt: 0 })
+  }, [fresh, stepKey, stage])
   const setStage = useCallback((s: Stage) => setStageState((prev) => ({ key: stepKey, stage: s, attempt: prev.key === stepKey ? prev.attempt : 0 })), [stepKey])
   const restartDrill = () => {
     drillDebug.current = null
@@ -133,13 +138,14 @@ export function Test({ session }: { session: Session }) {
   const [pendingStart, setPendingStart] = useState(false)
   const stageRef = useRef(stage)
   stageRef.current = stage
+  // Only a fresh lock (false → true) resumes with a countdown; a chained drill starting while
+  // already locked must not, even though setStage changes identity with each step.
+  const wasLocked = useRef(pointer.locked)
   useEffect(() => {
-    if (!pointer.locked) return
-    if (stageRef.current !== 'intro') setStage('countdown')
-    else if (pendingStart) {
-      setPendingStart(false)
-      setStage('countdown')
-    }
+    const next = onLockChange({ wasLocked: wasLocked.current, locked: pointer.locked, stage: stageRef.current, pendingStart })
+    wasLocked.current = pointer.locked
+    if (next.clearPending) setPendingStart(false)
+    if (next.stage) setStage(next.stage)
   }, [pointer.locked, pendingStart, setStage])
   useEffect(() => {
     if (pointer.error) setPendingStart(false)
@@ -155,13 +161,13 @@ export function Test({ session }: { session: Session }) {
 
   // While locked between drills there is no cursor: any left click starts the next drill.
   useEffect(() => {
-    if (stage !== 'intro' || !pointer.locked || choosing) return
+    if (stage !== 'intro' || !pointer.locked) return
     const onDown = (e: MouseEvent) => {
       if (e.button === 0) setStage('countdown')
     }
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
-  }, [stage, pointer.locked, choosing, setStage])
+  }, [stage, pointer.locked, setStage])
 
   const [count, setCount] = useState(COUNTDOWN_FROM)
   useEffect(() => {
@@ -179,10 +185,11 @@ export function Test({ session }: { session: Session }) {
     return () => window.clearInterval(id)
   }, [stage, pointer.locked, setStage])
 
-  // The A/B choice needs the cursor.
+  // The results page needs the cursor back.
+  const finished = step === null
   useEffect(() => {
-    if (choosing) pointer.exit()
-  }, [choosing, pointer])
+    if (finished) pointer.exit()
+  }, [finished, pointer])
 
   const onComplete = useCallback(
     (r: DrillResult) => {
@@ -255,14 +262,16 @@ export function Test({ session }: { session: Session }) {
   const drillKey = `${stepKey}-${attempt}`
   const drillProps = { seed: step?.seed ?? 0, tracker, flush, active, onShot, debugRef: drillDebug }
 
-  const hudRounds = step?.stage === 'warmup' ? undefined : { total: prog.totalRounds, done: session.history.length }
-  const roundLabel =`รอบ ${prog.round}/${prog.totalRounds}${session.plan?.kind === 'validation' ? ' · ยืนยัน' : ''}`
-  const hudLabel = !step ? roundLabel : step.stage === 'warmup' ? 'วอร์มอัป · ไม่นับคะแนน' : `${roundLabel} · เซนส์ ${labelOf(step.candidate)}`
+  const hudRounds = step?.stage === 'warmup' ? undefined : { total: prog.totalSets, done: session.sets.length }
+  const roundLabel = `ชุด ${prog.set}/${prog.totalSets}`
+  const hudLabel = step?.stage === 'warmup' ? 'วอร์มอัป · ไม่นับคะแนน' : roundLabel
   const drillText =
     drillSnap && stage === 'playing'
-      ? drillSnap.kind === 'tracking'
-        ? `เหลือ ${Math.max(0, Math.ceil(TRACKING.durationS - drillSnap.clock))} วิ`
-        : `เป้า ${Math.min(drillSnap.index + 1, drillSnap.total)}/${drillSnap.total}`
+      ? `${DRILL_INFO[drillSnap.kind].name} · ${
+          drillSnap.kind === 'tracking'
+            ? `เหลือ ${Math.max(0, Math.ceil(TRACKING.durationS - drillSnap.clock))} วิ`
+            : `เป้า ${Math.min(drillSnap.index + 1, drillSnap.total)}/${drillSnap.total}`
+        }`
       : null
 
   return (
@@ -284,17 +293,11 @@ export function Test({ session }: { session: Session }) {
         fpsLow={fpsLow}
       />
 
-      {choosing && (
-        <div className="absolute inset-0 grid place-items-center bg-bg/85 backdrop-blur-md">
-          <ABChoice round={prog.round} totalRounds={prog.totalRounds} runs={session.runs as [CandidateRun, CandidateRun]} onChoose={choose} />
-        </div>
-      )}
-
       {step && stage === 'intro' && (
         <DrillIntro
           step={step}
           roundLabel={roundLabel}
-          sensChanged={step.stage === 'round' && step.candidate === 1 && step.drill === 'flick'}
+          sensChanged={step.stage === 'set' && step.index > 0 && startsSet(step)}
           rounds={hudRounds}
           remainingS={prog.remainingS}
           locked={pointer.locked}
@@ -393,9 +396,9 @@ export function Test({ session }: { session: Session }) {
 
 interface DrillIntroProps {
   step: Step
-  /** "รอบ 3/7" (plus "· ยืนยัน" on the validation round). */
+  /** "ชุด 3/12". */
   roundLabel: string
-  /** True at B's first drill: tell the player the sens just changed. */
+  /** True at the start of every scored set after the first: tell the player the sens just changed. */
   sensChanged: boolean
   /** Round stepper; omitted during warm-up. */
   rounds?: { total: number; done: number }
@@ -411,8 +414,9 @@ interface DrillIntroProps {
 
 function DrillIntro(p: DrillIntroProps) {
   const info = DRILL_INFO[p.step.drill]
-  const warmupStart = p.step.stage === 'warmup' && p.step.drill === 'flick'
-  const heading = p.step.stage === 'warmup' ? 'วอร์มอัป (ไม่นับคะแนน)' : `${p.roundLabel} · เซนส์ ${labelOf(p.step.candidate)}`
+  const setStart = startsSet(p.step)
+  const warmupStart = p.step.stage === 'warmup' && setStart
+  const heading = p.step.stage === 'warmup' ? 'วอร์มอัป (ไม่นับคะแนน)' : `${p.roundLabel} · ซ่อนค่าเซนส์ไว้`
   return (
     <div className={cn('absolute inset-0 grid place-items-center backdrop-blur-md', p.locked ? 'bg-bg/35' : 'bg-overlay')} data-testid="drill-intro">
       <motion.div {...cardIn} className="relative">
@@ -423,13 +427,33 @@ function DrillIntro(p: DrillIntroProps) {
           {p.rounds && <RoundDots {...p.rounds} testId="intro-stepper" className="mt-2 justify-center" />}
           {p.sensChanged && (
             <p data-testid="sens-changed" className="mt-1 text-sm font-medium text-good">
-              เปลี่ยนเป็นเซนส์ B แล้ว
+              เปลี่ยนเซนส์แล้ว
             </p>
           )}
-          <h1 className="mt-2 text-3xl font-bold tracking-tight" data-testid="intro-drill">
-            {info.name}
-          </h1>
-          <p className="mt-2 mb-5 text-[15px] leading-relaxed">{info.how}</p>
+          {setStart ? (
+            <>
+              <h1 className="mt-2 text-3xl font-bold tracking-tight" data-testid="intro-drill">
+                3 ด่านต่อกัน ~{SET_PLAY_S} วินาที
+              </h1>
+              <ol data-testid="intro-set" className="mx-auto mt-4 mb-5 max-w-80 space-y-1.5 text-left text-[15px]">
+                {DRILL_ORDER.map((k, i) => (
+                  <li key={k} className="flex gap-3">
+                    <span className="w-4 shrink-0 text-muted tabular-nums">{i + 1}</span>
+                    <span>
+                      <b className="font-semibold">{DRILL_INFO[k].name}</b> <span className="text-muted">{DRILL_INFO[k].how}</span>
+                    </span>
+                  </li>
+                ))}
+              </ol>
+            </>
+          ) : (
+            <>
+              <h1 className="mt-2 text-3xl font-bold tracking-tight" data-testid="intro-drill">
+                {info.name}
+              </h1>
+              <p className="mt-2 mb-5 text-[15px] leading-relaxed">{info.how}</p>
+            </>
+          )}
 
           {warmupStart && (
             <ul data-testid="calibration" className="mb-5 space-y-1.5 rounded-xl border border-line bg-bg/60 p-4 text-left text-sm text-muted">

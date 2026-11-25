@@ -1,14 +1,12 @@
 import { fakeClick, fakeRun, fakeTracking } from './fakeResults'
 import {
-  CLOSE_MARGIN,
   DRILL_WEIGHTS,
   drillScores,
   flickBias,
+  flickLead,
   flickScore,
-  judge,
   measuredScore,
   microScore,
-  totalScores,
   trackingScore,
 } from './scoring'
 
@@ -65,20 +63,6 @@ describe('measuredScore', () => {
   })
 })
 
-describe('totalScores', () => {
-  it('is 60% measured + 40% feel', () => {
-    const a = totalScores(0.5, 0.5, 'A')
-    expect(a.a).toBeCloseTo(0.7)
-    expect(a.b).toBeCloseTo(0.3)
-    const b = totalScores(0.5, 0.5, 'B')
-    expect(b.a).toBeCloseTo(0.3)
-    expect(b.b).toBeCloseTo(0.7)
-    const same = totalScores(1, 0, 'same')
-    expect(same.a).toBeCloseTo(0.8)
-    expect(same.b).toBeCloseTo(0.2)
-  })
-})
-
 describe('flickBias', () => {
   it('flags consistent overshoot / undershoot', () => {
     expect(flickBias(fakeClick('flick', { primaryErrorDeg: 5 }).summary)).toBe('over')
@@ -96,46 +80,14 @@ describe('flickBias', () => {
   })
 })
 
-describe('judge', () => {
-  const run = fakeRun(0.6)
-
-  it('picks the clearly better total', () => {
-    expect(judge({ sens: 0.3, run: fakeRun(0.8) }, { sens: 0.5, run: fakeRun(0.4) }, 'same', 'other').winner).toBe('A')
-    expect(judge({ sens: 0.3, run }, { sens: 0.5, run }, 'B', 'other')).toMatchObject({ winner: 'B', by: 'score' })
+describe('flickLead', () => {
+  it('is the mean signed first-movement error relative to the distance', () => {
+    expect(flickLead(fakeClick('flick', { primaryErrorDeg: 5, distanceDeg: 50 }))).toBeCloseTo(0.1)
+    expect(flickLead(fakeClick('flick', { primaryErrorDeg: -10, distanceDeg: 50 }))).toBeCloseTo(-0.2)
   })
 
-  it('feel can outweigh a small measured lead', () => {
-    const j = judge({ sens: 0.3, run: fakeRun(0.65) }, { sens: 0.5, run: fakeRun(0.6) }, 'B', 'other')
-    expect(j.winner).toBe('B')
-  })
-
-  it('is a tie when close with no bias signal', () => {
-    const j = judge({ sens: 0.3, run }, { sens: 0.5, run }, 'same', 'other')
-    expect(Math.abs(j.total.a - j.total.b)).toBeLessThan(CLOSE_MARGIN)
-    expect(j).toMatchObject({ winner: 'tie', by: 'tie' })
-  })
-
-  it('when close, overshoot on the higher sens picks the lower one', () => {
-    const j = judge({ sens: 0.5, run: fakeRun(0.6, 5) }, { sens: 0.3, run: fakeRun(0.6, 5) }, 'same', 'other')
-    // Both overshoot: only the higher sens' bias counts as "too fast".
-    expect(j).toMatchObject({ winner: 'B', by: 'bias' })
-  })
-
-  it('when close, undershoot on the lower sens picks the higher one', () => {
-    const j = judge({ sens: 0.3, run: fakeRun(0.6, -5) }, { sens: 0.5, run }, 'same', 'other')
-    expect(j).toMatchObject({ winner: 'B', by: 'bias' })
-  })
-
-  it('conflicting signals are a tie', () => {
-    const j = judge({ sens: 0.3, run: fakeRun(0.6, -5) }, { sens: 0.5, run: fakeRun(0.6, 5) }, 'same', 'other')
-    expect(j.winner).toBe('tie')
-  })
-
-  it('role changes the measured weighting', () => {
-    const flicky = { ...fakeRun(0.5), flick: fakeRun(1).flick }
-    const steady = { ...fakeRun(0.5), tracking: fakeRun(1).tracking }
-    const other = judge({ sens: 0.3, run: flicky }, { sens: 0.5, run: steady }, 'same', 'other')
-    const duelist = judge({ sens: 0.3, run: flicky }, { sens: 0.5, run: steady }, 'same', 'duelist')
-    expect(duelist.measured.a - duelist.measured.b).toBeGreaterThan(other.measured.a - other.measured.b)
+  it('is null when no flick was attempted', () => {
+    const r = fakeClick('flick')
+    expect(flickLead({ ...r, trials: r.trials.map((t) => ({ ...t, attempted: false })) })).toBeNull()
   })
 })
