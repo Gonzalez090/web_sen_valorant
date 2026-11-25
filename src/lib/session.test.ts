@@ -1,4 +1,5 @@
 import { fakeRun } from './fakeResults'
+import { roundSens } from './sens'
 import type { DrillResult } from './metrics'
 import {
   awaitingChoice,
@@ -156,10 +157,17 @@ describe('summarizeSession', () => {
     for (let i = 0; i < 7; i++) s = choose(playSet(playSet(s)), 'same', i)
     const sum = summarizeSession(s)
     expect(sum.sens).toBe(s.psa.base)
-    expect(sum.range[0]).toBeCloseTo(s.psa.base * 0.97)
-    expect(sum.range[1]).toBeCloseTo(s.psa.base * 1.03)
+    expect(sum.range[0]).toBeCloseTo(roundSens(s.psa.base) * 0.97, 9)
+    expect(sum.range[1]).toBeCloseTo(roundSens(s.psa.base) * 1.03, 9)
     expect(sum.profile).not.toBeNull()
     expect(sum.bias.runs).toBe(14)
+  })
+
+  it('takes the range from the 3-decimal sens the user is shown', () => {
+    const s = playSet(newSession(settings, 1))
+    const sum = summarizeSession({ ...s, psa: { ...s.psa, base: 0.129387 } })
+    expect(roundSens(sum.range[0])).toBe(0.125)
+    expect(roundSens(sum.range[1])).toBe(0.133)
   })
 
   it('has no profile before any round', () => {

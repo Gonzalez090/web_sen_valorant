@@ -1,8 +1,13 @@
+import { motion } from 'framer-motion'
+import { LogOut, Play, RotateCcw, Volume2, VolumeX } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ABChoice } from '../components/ABChoice'
 import { Crosshair } from '../components/Crosshair'
 import { HitMarker } from '../components/HitMarker'
-import { Hud } from '../components/Hud'
+import { Hud, RoundDots } from '../components/Hud'
+import { Button } from '../components/ui/button'
+import { Card } from '../components/ui/card'
+import { Kbd } from '../components/ui/kbd'
 import type { DrillDebugState } from '../drills/common'
 import { Flick } from '../drills/Flick'
 import { Micro } from '../drills/Micro'
@@ -13,12 +18,12 @@ import { fakeRun } from '../lib/fakeResults'
 import { applyInput, newTracker, type LookTracker } from '../lib/look'
 import type { DrillKind, DrillResult } from '../lib/metrics'
 import type { CandidateRun } from '../lib/scoring'
-import { currentStep, progress, type Step } from '../lib/session'
+import { currentStep, progress, type Session, type Step } from '../lib/session'
 import { playHit, playMiss } from '../lib/sound'
 import { TRACKING } from '../lib/targets'
+import { cn, minutesText, radioKeyDown } from '../lib/utils'
 import { AimScene } from '../scenes/AimScene'
-import { useSessionStore } from '../store/useSessionStore'
-import { C, card, FONT, minutesText, muted, overlay, primaryButton, secondaryButton, warn } from '../ui/styles'
+import { CROSSHAIR_COLORS, useSessionStore } from '../store/useSessionStore'
 
 declare global {
   interface Window {
@@ -45,6 +50,8 @@ const HIT_MARKER_MS = 120
 const COUNTDOWN_FROM = 3
 /** FPS below this share of the refresh rate shows a warning. */
 const FPS_WARN_RATIO = 0.9
+/** FPS must stay low this long before warning, so shader-compile hitches at drill start don't flash it. */
+const FPS_WARN_AFTER_MS = 2000
 
 const DRILL_INFO: Record<DrillKind, { name: string; how: string }> = {
   flick: { name: 'Flick', how: 'เป้าจะโผล่ห่างจากเป้าเล็ง หมุนไปยิงให้เร็วและแม่นที่สุด' },
@@ -52,7 +59,16 @@ const DRILL_INFO: Record<DrillKind, { name: string; how: string }> = {
   tracking: { name: 'Tracking', how: 'เป้าเดินซ้ายขวา เล็งตามให้อยู่บนตัวเป้าตลอด ไม่ต้องคลิก' },
 }
 
-const labelOf = (c: 0 | 1) => (c === 0 ? 'A' : 'B')
+const COLOR_NAMES: Record<string, string> = { '#3DDC97': 'เขียว', '#F5F7FA': 'ขาว', '#FFE14D': 'เหลือง', '#4DD8FF': 'ฟ้า', '#FF5CE1': 'ชมพู' }
+
+const labelOf =(c: 0 | 1) => (c === 0 ? 'A' : 'B')
+
+/** Overlay card pop-in; only shown between drills, never while aiming. */
+const cardIn = {
+  initial: { opacity: 0, scale: 0.97 },
+  animate: { opacity: 1, scale: 1 },
+  transition: { duration: 0.18, ease: 'easeOut' as const },
+}
 
 /** Measures the display refresh rate once with requestAnimationFrame (median frame interval). */
 function useRefreshRate(onMeasured: (hz: number) => void, enabled: boolean) {
@@ -78,13 +94,15 @@ function useRefreshRate(onMeasured: (hz: number) => void, enabled: boolean) {
   }, [onMeasured, enabled])
 }
 
-export function Test() {
-  const session = useSessionStore((s) => s.session)!
+/** `session` comes from App so the page keeps its last session while fading out after a reset. */
+export function Test({ session }: { session: Session }) {
   const recordDrill = useSessionStore((s) => s.recordDrill)
   const choose = useSessionStore((s) => s.choose)
   const exitToSetup = useSessionStore((s) => s.exitToSetup)
   const soundOn = useSessionStore((s) => s.soundOn)
   const setSound = useSessionStore((s) => s.setSound)
+  const crosshairColor = useSessionStore((s) => s.crosshairColor)
+  const setCrosshairColor = useSessionStore((s) => s.setCrosshairColor)
   const refreshHz = useSessionStore((s) => s.refreshHz)
   const setRefreshHz = useSessionStore((s) => s.setRefreshHz)
   useRefreshRate(setRefreshHz, refreshHz === null)
@@ -199,10 +217,14 @@ export function Test() {
   const [drillSnap, setDrillSnap] = useState<DrillDebugState | null>(null)
   const [fpsLow, setFpsLow] = useState(false)
   useEffect(() => {
+    let lowSince: number | null = null
     const id = setInterval(() => {
       setDrillSnap(drillDebug.current ? { ...drillDebug.current } : null)
       const fps = Number(fpsRef.current?.textContent)
-      setFpsLow(refreshHz !== null && fps > 0 && fps < refreshHz * FPS_WARN_RATIO)
+      const low = refreshHz !== null && fps > 0 && fps < refreshHz * FPS_WARN_RATIO
+      const now = performance.now()
+      lowSince = low ? (lowSince ?? now) : null
+      setFpsLow(lowSince !== null && now - lowSince >= FPS_WARN_AFTER_MS)
     }, 100)
     return () => clearInterval(id)
   }, [refreshHz])
@@ -233,7 +255,8 @@ export function Test() {
   const drillKey = `${stepKey}-${attempt}`
   const drillProps = { seed: step?.seed ?? 0, tracker, flush, active, onShot, debugRef: drillDebug }
 
-  const roundLabel = `รอบ ${prog.round}/${prog.totalRounds}${session.plan?.kind === 'validation' ? ' · ยืนยัน' : ''}`
+  const hudRounds = step?.stage === 'warmup' ? undefined : { total: prog.totalRounds, done: session.history.length }
+  const roundLabel =`รอบ ${prog.round}/${prog.totalRounds}${session.plan?.kind === 'validation' ? ' · ยืนยัน' : ''}`
   const hudLabel = !step ? roundLabel : step.stage === 'warmup' ? 'วอร์มอัป · ไม่นับคะแนน' : `${roundLabel} · เซนส์ ${labelOf(step.candidate)}`
   const drillText =
     drillSnap && stage === 'playing'
@@ -243,17 +266,18 @@ export function Test() {
       : null
 
   return (
-    <div ref={containerRef} style={{ position: 'fixed', inset: 0, background: C.bg, color: C.text, fontFamily: FONT, userSelect: 'none' }}>
+    // The aim room is always dark, whatever theme the other pages use.
+    <div ref={containerRef} className="dark fixed inset-0 bg-bg text-fg select-none">
       <AimScene sens={sens} consume={pointer.consume} tracker={tracker} fpsRef={fpsRef}>
         {step?.drill === 'flick' && <Flick key={drillKey} {...drillProps} onComplete={onComplete} />}
         {step?.drill === 'micro' && <Micro key={drillKey} {...drillProps} onComplete={onComplete} />}
         {step?.drill === 'tracking' && <Tracking key={drillKey} {...drillProps} onComplete={onComplete} />}
       </AimScene>
-      <Crosshair />
+      <Crosshair color={crosshairColor} />
       <HitMarker visible={hitVisible} />
       <Hud
         label={hudLabel}
-        rounds={step?.stage === 'warmup' ? undefined : { total: prog.totalRounds, done: session.history.length }}
+        rounds={hudRounds}
         drillText={drillText}
         progress={prog.drillsTotal ? prog.drillsDone / prog.drillsTotal : 0}
         fpsRef={fpsRef}
@@ -261,7 +285,7 @@ export function Test() {
       />
 
       {choosing && (
-        <div style={{ ...overlay, background: 'rgba(11,13,16,0.8)' }}>
+        <div className="absolute inset-0 grid place-items-center bg-bg/85 backdrop-blur-md">
           <ABChoice round={prog.round} totalRounds={prog.totalRounds} runs={session.runs as [CandidateRun, CandidateRun]} onChoose={choose} />
         </div>
       )}
@@ -271,6 +295,7 @@ export function Test() {
           step={step}
           roundLabel={roundLabel}
           sensChanged={step.stage === 'round' && step.candidate === 1 && step.drill === 'flick'}
+          rounds={hudRounds}
           remainingS={prog.remainingS}
           locked={pointer.locked}
           waiting={pendingStart}
@@ -283,40 +308,83 @@ export function Test() {
       )}
 
       {step && stage === 'countdown' && pointer.locked && (
-        <div data-testid="countdown" style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', pointerEvents: 'none' }}>
-          <div style={{ textAlign: 'center', transform: 'translateY(-90px)' }}>
-            <div style={{ fontSize: 64, fontWeight: 700, fontVariantNumeric: 'tabular-nums', textShadow: '0 2px 12px rgba(0,0,0,0.6)' }}>{count}</div>
-            <div style={{ ...muted, color: C.text }}>{DRILL_INFO[step.drill].name}</div>
+        <div data-testid="countdown" className="pointer-events-none absolute inset-0 grid place-items-center">
+          <div className="-translate-y-24 text-center">
+            <div className="text-7xl font-bold tabular-nums [text-shadow:0_2px_12px_rgba(0,0,0,0.6)]">{count}</div>
+            <div className="mt-1 text-sm text-fg/80">{DRILL_INFO[step.drill].name}</div>
           </div>
         </div>
       )}
 
       {step && stage !== 'intro' && !pointer.locked && (
-        <div style={overlay} data-testid="pause-menu">
-          <div style={{ ...card, width: 380, maxWidth: 'calc(100vw - 32px)' }}>
-            <h1 style={{ margin: '0 0 4px', fontSize: 20 }}>หยุดชั่วคราว</h1>
-            <p style={{ ...muted, margin: '0 0 16px' }}>
-              {DRILL_INFO[step.drill].name} · เหลือ{minutesText(prog.remainingS)} · เวลาด่านหยุดเดินระหว่างพัก
-            </p>
-            {pointer.error && (
-              <p data-testid="lock-error" style={warn}>
-                {lockErrorMessage(pointer.error)}
+        <div className="absolute inset-0 grid place-items-center bg-overlay backdrop-blur-md" data-testid="pause-menu">
+          <motion.div {...cardIn} className="relative">
+            <Card className="w-95 max-w-[calc(100vw-32px)]">
+              <h1 className="text-xl font-bold">หยุดชั่วคราว</h1>
+              <p className="mt-1 text-sm text-muted">
+                {DRILL_INFO[step.drill].name} · เหลือ{minutesText(prog.remainingS)}
               </p>
-            )}
-            <button data-testid="resume-button" autoFocus onClick={() => void pointer.request()} style={primaryButton}>
-              ทำต่อ
-            </button>
-            <button data-testid="restart-drill-button" onClick={restartDrill} style={{ ...secondaryButton, marginTop: 8 }}>
-              เริ่มด่านนี้ใหม่
-            </button>
-            <button data-testid="exit-button" onClick={exitToSetup} style={{ ...secondaryButton, marginTop: 8 }}>
-              ออก (บันทึกความคืบหน้าไว้)
-            </button>
-            <label style={{ ...muted, display: 'flex', gap: 8, alignItems: 'center', marginTop: 16 }}>
-              <input type="checkbox" data-testid="sound-toggle" checked={soundOn} onChange={(e) => setSound(e.target.checked)} />
-              เสียงตอนยิงโดน/พลาด
-            </label>
-          </div>
+              <p className="mt-0.5 mb-5 text-xs text-muted">เวลาด่านหยุดเดินระหว่างพัก</p>
+              <Button data-testid="resume-button" autoFocus size="lg" className="w-full" onClick={() => void pointer.request()}>
+                <Play className="size-4" strokeWidth={2} aria-hidden /> ทำต่อ
+              </Button>
+              <Button data-testid="restart-drill-button" variant="secondary" className="mt-2 w-full" onClick={restartDrill}>
+                <RotateCcw className="size-4" strokeWidth={1.75} aria-hidden /> เริ่มด่านนี้ใหม่
+              </Button>
+              <Button data-testid="exit-button" variant="secondary" className="mt-2 w-full" onClick={exitToSetup}>
+                <LogOut className="size-4" strokeWidth={1.75} aria-hidden /> ออก (บันทึกความคืบหน้าไว้)
+              </Button>
+
+              <div className="mt-6 space-y-4 border-t border-line pt-5">
+                <label className="flex cursor-pointer items-center justify-between gap-3 rounded-lg text-sm has-focus-visible:outline-2 has-focus-visible:outline-offset-4 has-focus-visible:outline-accent">
+                  <span className="flex items-center gap-2 text-muted">
+                    {soundOn ? <Volume2 className="size-4" strokeWidth={1.75} aria-hidden /> : <VolumeX className="size-4" strokeWidth={1.75} aria-hidden />}
+                    เสียงตอนยิงโดน/พลาด
+                  </span>
+                  <input type="checkbox" role="switch" data-testid="sound-toggle" checked={soundOn} onChange={(e) => setSound(e.target.checked)} className="sr-only" />
+                  <span aria-hidden className={cn('relative h-5 w-9 shrink-0 rounded-full transition-colors duration-150 motion-reduce:transition-none', soundOn ? 'bg-good' : 'bg-fg/20')}>
+                    <span
+                      className={cn(
+                        'absolute top-0.5 left-0.5 size-4 rounded-full bg-white shadow transition-transform duration-150 motion-reduce:transition-none',
+                        soundOn && 'translate-x-4',
+                      )}
+                    />
+                  </span>
+                </label>
+                <div className="flex items-center justify-between gap-3 text-sm">
+                  <span className="text-muted" id="crosshair-label">
+                    สี crosshair
+                  </span>
+                  <div role="radiogroup" aria-labelledby="crosshair-label" className="flex gap-2">
+                    {CROSSHAIR_COLORS.map((c) => (
+                      <button
+                        key={c}
+                        type="button"
+                        role="radio"
+                        aria-checked={crosshairColor === c}
+                        aria-label={COLOR_NAMES[c]}
+                        title={COLOR_NAMES[c]}
+                        // Unknown saved colour: keep the first swatch reachable by Tab.
+                        tabIndex={crosshairColor === c || (!CROSSHAIR_COLORS.includes(crosshairColor as (typeof CROSSHAIR_COLORS)[number]) && c === CROSSHAIR_COLORS[0]) ? 0 : -1}
+                        data-testid={`crosshair-color-${c.slice(1)}`}
+                        onClick={() => setCrosshairColor(c)}
+                        onKeyDown={(e) => radioKeyDown<string>(e, CROSSHAIR_COLORS, crosshairColor, setCrosshairColor)}
+                        className={cn(
+                          'size-6 rounded-full border-2 transition-transform duration-150 motion-reduce:transition-none',
+                          crosshairColor === c ? 'scale-110 border-fg' : 'border-transparent',
+                        )}
+                        style={{ background: c }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <p className="mt-5 text-center text-xs text-muted">
+                กด <Kbd>Esc</Kbd> ได้ทุกเมื่อเพื่อพัก
+              </p>
+            </Card>
+            <LockError error={pointer.error} />
+          </motion.div>
         </div>
       )}
     </div>
@@ -329,6 +397,8 @@ interface DrillIntroProps {
   roundLabel: string
   /** True at B's first drill: tell the player the sens just changed. */
   sensChanged: boolean
+  /** Round stepper; omitted during warm-up. */
+  rounds?: { total: number; done: number }
   remainingS: number
   locked: boolean
   waiting: boolean
@@ -342,68 +412,78 @@ interface DrillIntroProps {
 function DrillIntro(p: DrillIntroProps) {
   const info = DRILL_INFO[p.step.drill]
   const warmupStart = p.step.stage === 'warmup' && p.step.drill === 'flick'
-  const heading =
-    p.step.stage === 'warmup' ? 'วอร์มอัป (ไม่นับคะแนน)' : `${p.roundLabel} · เซนส์ ${labelOf(p.step.candidate)}`
+  const heading = p.step.stage === 'warmup' ? 'วอร์มอัป (ไม่นับคะแนน)' : `${p.roundLabel} · เซนส์ ${labelOf(p.step.candidate)}`
   return (
-    <div style={{ ...overlay, background: p.locked ? 'rgba(11,13,16,0.35)' : overlay.background }} data-testid="drill-intro">
-      <div style={{ ...card, width: 420, maxWidth: 'calc(100vw - 32px)', textAlign: 'center' }}>
-        <p style={{ ...muted, margin: 0 }} data-testid="intro-heading">
-          {heading}
-        </p>
-        {p.sensChanged && (
-          <p data-testid="sens-changed" style={{ color: C.mint, fontSize: 13, margin: '4px 0 0' }}>
-            เปลี่ยนเป็นเซนส์ B แล้ว
+    <div className={cn('absolute inset-0 grid place-items-center backdrop-blur-md', p.locked ? 'bg-bg/35' : 'bg-overlay')} data-testid="drill-intro">
+      <motion.div {...cardIn} className="relative">
+        <Card className="w-105 max-w-[calc(100vw-32px)] text-center">
+          <p className="text-sm text-muted tabular-nums" data-testid="intro-heading">
+            {heading}
           </p>
-        )}
-        <h1 style={{ margin: '8px 0 4px', fontSize: 28 }} data-testid="intro-drill">
-          {info.name}
-        </h1>
-        <p style={{ margin: '0 0 16px', fontSize: 15, lineHeight: 1.6 }}>{info.how}</p>
+          {p.rounds && <RoundDots {...p.rounds} testId="intro-stepper" className="mt-2 justify-center" />}
+          {p.sensChanged && (
+            <p data-testid="sens-changed" className="mt-1 text-sm font-medium text-good">
+              เปลี่ยนเป็นเซนส์ B แล้ว
+            </p>
+          )}
+          <h1 className="mt-2 text-3xl font-bold tracking-tight" data-testid="intro-drill">
+            {info.name}
+          </h1>
+          <p className="mt-2 mb-5 text-[15px] leading-relaxed">{info.how}</p>
 
-        {warmupStart && (
-          <ul data-testid="calibration" style={{ ...muted, listStyle: 'none', padding: 0, margin: '0 0 16px', textAlign: 'left' }}>
-            <li>
-              จอ: <b style={{ color: C.text }}>{p.refreshHz ? `${p.refreshHz} Hz` : 'กำลังวัด…'}</b>
-            </li>
-            <li>
-              Raw input: <RawText status={p.rawStatus} />
-            </li>
-            <li>พักได้ตลอดด้วย Esc · ความคืบหน้าบันทึกอัตโนมัติ</li>
-          </ul>
-        )}
-        {!warmupStart && p.rawStatus !== null && p.rawStatus !== 'raw' && (
-          <p style={{ ...warn, margin: '0 0 12px' }}>ยืนยัน raw input ไม่ได้ ปิด "Enhance pointer precision" ใน Windows ก่อนทดสอบ</p>
-        )}
-        {p.error && (
-          <p data-testid="lock-error" style={warn}>
-            {lockErrorMessage(p.error)}
+          {warmupStart && (
+            <ul data-testid="calibration" className="mb-5 space-y-1.5 rounded-xl border border-line bg-bg/60 p-4 text-left text-sm text-muted">
+              <li className="flex justify-between gap-3">
+                <span className="shrink-0 whitespace-nowrap">จอ</span> <b className="text-fg tabular-nums">{p.refreshHz ? `${p.refreshHz} Hz` : 'กำลังวัด…'}</b>
+              </li>
+              <li className="flex justify-between gap-3">
+                <span className="shrink-0 whitespace-nowrap">Raw input</span> <RawText status={p.rawStatus} />
+              </li>
+              <li className="pt-1 text-xs">พักได้ตลอดด้วย Esc · ความคืบหน้าบันทึกอัตโนมัติ</li>
+            </ul>
+          )}
+          {!warmupStart && p.rawStatus !== null && p.rawStatus !== 'raw' && (
+            <p className="mb-4 text-sm text-warn">ยืนยัน raw input ไม่ได้ ปิด "Enhance pointer precision" ใน Windows ก่อนทดสอบ</p>
+          )}
+          {p.locked ? (
+            <p className="text-base font-semibold" data-testid="click-to-start">
+              คลิกเพื่อเริ่ม
+            </p>
+          ) : (
+            <>
+              <Button data-testid="start-drill-button" autoFocus size="lg" className="w-full" disabled={p.waiting} onClick={p.onStart}>
+                {p.waiting ? 'กำลังล็อกเมาส์…' : 'คลิกเพื่อเริ่ม'}
+              </Button>
+              <Button data-testid="exit-button" variant="ghost" className="mt-2 w-full" onClick={p.onExit}>
+                ออก (บันทึกความคืบหน้าไว้)
+              </Button>
+            </>
+          )}
+          <p className="mt-3 text-xs text-muted" data-testid="remaining-time">
+            เหลือ{minutesText(p.remainingS)}
           </p>
-        )}
-
-        {p.locked ? (
-          <p style={{ fontSize: 16, fontWeight: 600, margin: 0 }} data-testid="click-to-start">
-            คลิกเพื่อเริ่ม
-          </p>
-        ) : (
-          <>
-            <button data-testid="start-drill-button" autoFocus disabled={p.waiting} onClick={p.onStart} style={primaryButton}>
-              {p.waiting ? 'กำลังล็อกเมาส์…' : 'คลิกเพื่อเริ่ม'}
-            </button>
-            <button data-testid="exit-button" onClick={p.onExit} style={{ ...secondaryButton, marginTop: 8, border: 0, color: C.muted }}>
-              ออก (บันทึกความคืบหน้าไว้)
-            </button>
-          </>
-        )}
-        <p style={{ ...muted, margin: '12px 0 0', fontSize: 12 }} data-testid="remaining-time">
-          เหลือ{minutesText(p.remainingS)}
-        </p>
-      </div>
+        </Card>
+        <LockError error={p.error} />
+      </motion.div>
     </div>
   )
 }
 
+/**
+ * Pointer-lock failure shown just below a centred card. Positioned outside the card so the card's
+ * height never changes and its buttons don't move under the cursor.
+ */
+function LockError({ error }: { error: string | null }) {
+  if (!error) return null
+  return (
+    <p data-testid="lock-error" role="alert" className="absolute inset-x-0 top-full mt-3 rounded-xl border border-warn/30 bg-card px-4 py-2.5 text-center text-sm text-warn">
+      {lockErrorMessage(error)}
+    </p>
+  )
+}
+
 function RawText({ status }: { status: RawInputStatus | null }) {
-  if (status === null) return <b style={{ color: C.text }}>ตรวจเมื่อเริ่ม</b>
-  if (status === 'raw') return <b style={{ color: C.mint }}>ทำงาน ✓</b>
-  return <b style={{ color: C.amber }}>ยืนยันไม่ได้ · ปิด "Enhance pointer precision" ใน Windows</b>
+  if (status === null) return <b className="text-fg">ตรวจเมื่อเริ่ม</b>
+  if (status === 'raw') return <b className="text-good">ทำงาน ✓</b>
+  return <b className="text-right text-warn">ยืนยันไม่ได้ · ปิด "Enhance pointer precision" ใน Windows</b>
 }

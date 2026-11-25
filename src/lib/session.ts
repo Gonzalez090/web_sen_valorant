@@ -1,7 +1,7 @@
 import type { DrillKind, DrillResult } from './metrics'
 import { applyRound, FINE_PSA, FULL_PSA, initPsa, isDone, planRound, totalRounds, validationSide, type PsaState, type RoundPlan } from './psa'
 import { drillScores, flickBias, judge, type AimBias, type CandidateRun, type DrillScores, type Judgement, type Preference, type Role } from './scoring'
-import { defaultSens } from './sens'
+import { defaultSens, roundSens } from './sens'
 
 /** The whole test flow as plain data (persisted to localStorage), plus pure transitions. */
 
@@ -198,7 +198,8 @@ export function summarizeSession(s: Session): SessionSummary {
   const biases: { sens: number; bias: AimBias }[] = runs.map((r) => ({ sens: r.sens, bias: flickBias(r.run.flick.summary) }))
   return {
     sens,
-    range: [sens * (1 - RANGE_PCT), sens * (1 + RANGE_PCT)],
+    // From the 3-decimal value the user is shown, so the range matches it exactly.
+    range: [roundSens(sens) * (1 - RANGE_PCT), roundSens(sens) * (1 + RANGE_PCT)],
     profile: scores.length ? { flick: avg('flick'), micro: avg('micro'), tracking: avg('tracking') } : null,
     bias: {
       runs: runs.length,

@@ -6,6 +6,9 @@ import { roundSens } from '../lib/sens'
 import { choose, fineSession, newSession, recordDrill, type Session, type Settings } from '../lib/session'
 
 export type View = 'setup' | 'session'
+export type Theme = 'dark' | 'light'
+
+export const CROSSHAIR_COLORS = ['#3DDC97', '#F5F7FA', '#FFE14D', '#4DD8FF', '#FF5CE1'] as const
 
 interface SessionStore {
   /** 'session' shows the test or results; 'setup' can be shown with a session still saved. */
@@ -14,6 +17,8 @@ interface SessionStore {
   /** Last settings used, to prefill the setup page. */
   lastSettings: Settings | null
   soundOn: boolean
+  theme: Theme
+  crosshairColor: string
   /** Measured display refresh rate (Hz), null until measured. Not persisted. */
   refreshHz: number | null
 
@@ -26,9 +31,11 @@ interface SessionStore {
   fineTune: () => void
   /** Leaves to the setup page, keeping the session so it can be resumed. */
   exitToSetup: () => void
-  /** Drops the session and goes back to setup. */
+  /** Drops the session and the saved form settings, and goes back to setup. */
   reset: () => void
   setSound: (on: boolean) => void
+  setTheme: (theme: Theme) => void
+  setCrosshairColor: (color: string) => void
   setRefreshHz: (hz: number) => void
 }
 
@@ -41,6 +48,8 @@ export const useSessionStore = create<SessionStore>()(
       session: null,
       lastSettings: null,
       soundOn: true,
+      theme: 'dark',
+      crosshairColor: CROSSHAIR_COLORS[0],
       refreshHz: null,
 
       start: (settings) => set({ session: newSession(settings, randomSeed()), lastSettings: settings, view: 'session' }),
@@ -61,15 +70,17 @@ export const useSessionStore = create<SessionStore>()(
         if (s) set({ session: fineSession(s.settings, roundSens(s.psa.base), randomSeed()), view: 'session' })
       },
       exitToSetup: () => set({ view: 'setup' }),
-      reset: () => set({ session: null, view: 'setup' }),
+      reset: () => set({ session: null, lastSettings: null, view: 'setup' }),
       setSound: (soundOn) => set({ soundOn }),
+      setTheme: (theme) => set({ theme }),
+      setCrosshairColor: (crosshairColor) => set({ crosshairColor }),
       setRefreshHz: (refreshHz) => set({ refreshHz }),
     }),
     {
       name: 'sens-finder-session',
       version: 1,
       storage: createJSONStorage(() => localStorage),
-      partialize: ({ view, session, lastSettings, soundOn }) => ({ view, session, lastSettings, soundOn }),
+      partialize: ({ view, session, lastSettings, soundOn, theme, crosshairColor }) => ({ view, session, lastSettings, soundOn, theme, crosshairColor }),
     },
   ),
 )

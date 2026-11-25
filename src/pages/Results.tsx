@@ -1,14 +1,22 @@
+import { motion } from 'framer-motion'
+import { toPng } from 'html-to-image'
+import { CheckCircle2, Copy, Crosshair, ImageDown, Info, RotateCcw, TriangleAlert, type LucideIcon } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { CartesianGrid, Line, LineChart, PolarAngleAxis, PolarGrid, PolarRadiusAxis, Radar, RadarChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
-import { buildInsights, type Insight } from '../lib/insights'
-import { niceTicks } from '../lib/niceTicks'
-import { summarizeSession, type Session } from '../lib/session'
-import { cmPer360, edpi, roundSens } from '../lib/sens'
-import { useSessionStore } from '../store/useSessionStore'
-import { C, card, FONT, muted, page, primaryButton, secondaryButton } from '../ui/styles'
+import { ShareCard } from '@/components/ShareCard'
+import { useToast } from '@/components/Toast'
+import { Button } from '@/components/ui/button'
+import { Card } from '@/components/ui/card'
+import { HelpTip } from '@/components/ui/tooltip'
+import { buildInsights, DRILL_NAMES, type Insight } from '@/lib/insights'
+import type { DrillScores } from '@/lib/scoring'
+import { niceTicks } from '@/lib/niceTicks'
+import { summarizeSession, type Session } from '@/lib/session'
+import { cmPer360, edpi, roundSens } from '@/lib/sens'
+import { cn } from '@/lib/utils'
+import { useSessionStore, type Theme } from '@/store/useSessionStore'
 
 const COUNT_UP_MS = 700
-const TOAST_MS = 2000
 
 const reducedMotion = () => typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
 
@@ -31,6 +39,12 @@ function useCountUp(target: number): number {
     return () => cancelAnimationFrame(id)
   }, [target])
   return v
+}
+
+/** Chart colours per theme (recharts needs concrete colours, not CSS variables). */
+const CHART: Record<Theme, { accent: string; good: string; muted: string; dot: string; grid: string; fg: string; card: string; border: string }> = {
+  dark: { accent: '#FF4655', good: '#3DDC97', muted: '#8A93A3', dot: 'rgba(138,147,163,0.5)', grid: 'rgba(255,255,255,0.05)', fg: '#F5F7FA', card: '#171A21', border: 'rgba(255,255,255,0.12)' },
+  light: { accent: '#E0323F', good: '#0F7F52', muted: '#5B6472', dot: 'rgba(91,100,114,0.45)', grid: 'rgba(11,13,16,0.06)', fg: '#0B0D10', card: '#FFFFFF', border: 'rgba(11,13,16,0.16)' },
 }
 
 const fmt = (x: number) => roundSens(x).toFixed(3)
@@ -58,12 +72,18 @@ function roundRows(s: Session): RoundRow[] {
   })
 }
 
-const tooltipStyle = { background: C.card, border: `1px solid ${C.borderStrong}`, borderRadius: 8, fontFamily: FONT }
+const fadeUp = (i: number) => ({
+  initial: { opacity: 0, y: 10 },
+  animate: { opacity: 1, y: 0 },
+  transition: { duration: 0.22, ease: 'easeOut' as const, delay: 0.1 + i * 0.05 },
+})
 
-export function Results() {
-  const session = useSessionStore((s) => s.session)!
+/** `session` comes from App so the page keeps its last session while fading out after a reset. */
+export function Results({ session }: { session: Session }) {
   const fineTune = useSessionStore((s) => s.fineTune)
   const reset = useSessionStore((s) => s.reset)
+  const theme = useSessionStore((s) => s.theme)
+  const c = CHART[theme]
 
   const summary = useMemo(() => summarizeSession(session), [session])
   const insights = useMemo(() => buildInsights(session), [session])
@@ -75,21 +95,38 @@ export function Results() {
   const sens = roundSens(summary.sens)
   const shown = useCountUp(sens)
   const dpi = session.settings.dpi
+  const edpiValue = edpi(dpi, sens)
+  const cm360 = cmPer360(sens, dpi)
 
-  const [toast, setToast] = useState<string | null>(null)
-  const toastTimer = useRef<number>()
-  useEffect(() => () => window.clearTimeout(toastTimer.current), [])
-  const showToast = (msg: string) => {
-    setToast(msg)
-    window.clearTimeout(toastTimer.current)
-    toastTimer.current = window.setTimeout(() => setToast(null), TOAST_MS)
-  }
+  const [toast, showToast] = useToast()
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(sens.toFixed(3))
       showToast('คัดลอกแล้ว')
     } catch {
       showToast('คัดลอกไม่ได้ ลองเลือกตัวเลขแล้วกด Ctrl+C')
+    }
+  }
+
+  const shareRef = useRef<HTMLDivElement>(null)
+  const [sharing, setSharing] = useState(false)
+  const saveImage = async () => {
+    const node = shareRef.current
+    if (!node) return
+    setSharing(true)
+    try {
+      const opts = { pixelRatio: 1, cacheBust: true, width: 1200, height: 630 }
+      // Embedding web fonts can fail (offline, blocked CSS); fall back to system fonts.
+      const url = await toPng(node, opts).catch(() => toPng(node, { ...opts, skipFonts: true }))
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `sens-${sens.toFixed(3)}.png`
+      a.click()
+      showToast('บันทึกรูปแล้ว')
+    } catch {
+      showToast('สร้างรูปไม่สำเร็จ ลองใหม่อีกครั้ง')
+    } finally {
+      setSharing(false)
     }
   }
 
@@ -101,62 +138,83 @@ export function Results() {
       })
     : []
 
+  const strengths = useMemo(() => {
+    if (!profile) return null
+    const order = (Object.keys(profile) as (keyof DrillScores)[]).sort((a, b) => profile[b] - profile[a])
+    return { best: order[0], worst: order[order.length - 1] }
+  }, [profile])
+
+  const tooltipStyle ={ background: c.card, border: `1px solid ${c.border}`, borderRadius: 8, color: c.fg, fontSize: 12 }
+
   return (
-    <main style={page}>
-      <div style={{ maxWidth: 880, margin: '0 auto' }}>
-        <section style={{ textAlign: 'center' }}>
-          <p style={{ ...muted, fontSize: 15, margin: 0 }}>เซนส์ที่แนะนำใน Valorant{session.mode === 'fine' && ' (ทดสอบละเอียด)'}</p>
-          <div
-            data-testid="result-sens"
-            data-value={sens.toFixed(3)}
-            style={{ fontSize: 120, fontWeight: 800, lineHeight: 1.05, letterSpacing: -2, fontVariantNumeric: 'tabular-nums', margin: '8px 0 16px', userSelect: 'all' }}
-          >
-            {shown.toFixed(3)}
+    <main className="px-4 py-16 sm:py-20">
+      <div className="mx-auto max-w-220">
+        <section className="text-center">
+          <motion.p {...fadeUp(0)} className="text-base text-muted">
+            เซนส์ที่แนะนำใน Valorant{session.mode === 'fine' && ' (ทดสอบละเอียด)'}
+          </motion.p>
+          <div className="mt-2 flex items-center justify-center gap-2">
+            <div
+              data-testid="result-sens"
+              data-value={sens.toFixed(3)}
+              className="text-[clamp(72px,15vw,136px)] leading-none font-extrabold tracking-tighter tabular-nums select-all"
+            >
+              {shown.toFixed(3)}
+            </div>
+            <Button data-testid="copy-icon-button" variant="ghost" size="icon" aria-label="คัดลอกค่าเซนส์" onClick={() => void copy()}>
+              <Copy className="size-5" strokeWidth={1.75} aria-hidden />
+            </Button>
           </div>
-          <div style={{ maxWidth: 360, margin: '0 auto' }}>
-            <button data-testid="copy-button" autoFocus onClick={() => void copy()} style={primaryButton}>
-              คัดลอกเซนส์
-            </button>
-          </div>
+          <motion.div {...fadeUp(1)} className="mx-auto mt-8 max-w-sm">
+            <Button data-testid="copy-button" autoFocus size="lg" className="w-full" onClick={() => void copy()}>
+              <Copy className="size-5" strokeWidth={2} aria-hidden /> คัดลอกเซนส์
+            </Button>
+          </motion.div>
         </section>
 
-        <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 16, marginTop: 40 }}>
-          <Stat label="eDPI" help="DPI × เซนส์ ใช้เทียบความไวกับคนที่ใช้ DPI ต่างกัน" value={Math.round(edpi(dpi, sens)).toString()} testId="stat-edpi" />
-          <Stat label="cm/360" help="ระยะที่ต้องลากเมาส์เพื่อหมุนตัวครบ 1 รอบ" value={`${cmPer360(sens, dpi).toFixed(1)} cm`} testId="stat-cm360" />
-          <Stat label="ช่วงแนะนำ" help="ถ้าอยากปรับเอง ให้อยู่ในช่วงนี้ (±3%)" value={`${fmt(summary.range[0])} – ${fmt(summary.range[1])}`} testId="stat-range" />
+        <section className="mt-12 grid gap-4 sm:grid-cols-3">
+          <Stat i={2} label="eDPI" help="DPI × เซนส์ ใช้เทียบความไวกับคนที่ใช้ DPI ต่างกัน" value={Math.round(edpiValue).toString()} testId="stat-edpi" />
+          <Stat i={3} label="cm/360" help="ระยะที่ต้องลากเมาส์เพื่อหมุนตัวครบ 1 รอบ" value={`${cm360.toFixed(1)} cm`} testId="stat-cm360" />
+          <Stat i={4} label="ช่วงแนะนำ" help="ถ้าอยากปรับเอง ให้อยู่ในช่วงนี้ (±3%)" value={`${fmt(summary.range[0])} – ${fmt(summary.range[1])}`} testId="stat-range" />
         </section>
 
-        <section style={{ marginTop: 40 }}>
-          <h2 style={{ fontSize: 18, margin: '0 0 12px' }}>สิ่งที่เราเห็นจากการเล่นของคุณ</h2>
-          <div style={{ display: 'grid', gap: 12 }} data-testid="insights">
+        <motion.section {...fadeUp(5)} className="mt-12">
+          <h2 className="mb-4 text-lg font-semibold">สิ่งที่เราเห็นจากการเล่นของคุณ</h2>
+          <div className="grid gap-3" data-testid="insights">
             {insights.map((i) => (
               <InsightCard key={i.id} insight={i} />
             ))}
           </div>
-        </section>
+        </motion.section>
 
-        <section style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16, marginTop: 40 }}>
-          <div style={card}>
-            <h2 style={{ fontSize: 16, margin: '0 0 4px' }}>การบีบช่วงเซนส์</h2>
-            <p style={{ ...muted, margin: '0 0 12px', fontSize: 12 }}>
-              จุด<span style={{ color: C.mint }}>เขียว</span> = ค่าที่ชนะในรอบนั้น · เส้นแดง = ค่ากลางหลังจบรอบ
+        <motion.section {...fadeUp(6)} className="mt-12 grid gap-4 md:grid-cols-2">
+          <Card>
+            <h2 className="font-semibold">การบีบช่วงเซนส์</h2>
+            <p className="mt-1 mb-4 text-xs text-muted">
+              จุด<span className="font-medium text-good">เขียว</span> = ค่าที่ชนะ · จุดเทา = ค่าที่แพ้ · เส้น<span className="font-medium text-accent-text">แดง</span> = ค่ากลางหลังจบรอบ
             </p>
-            <div style={{ height: 240 }} data-testid="rounds-chart">
+            <div className="h-60" data-testid="rounds-chart">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={rows} margin={{ top: 8, right: 8, bottom: 0, left: -8 }}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.04)" vertical={false} />
-                  <XAxis dataKey="name" tick={{ fill: C.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
+                  <CartesianGrid stroke={c.grid} vertical={false} />
+                  <XAxis dataKey="name" tick={{ fill: c.muted, fontSize: 11 }} axisLine={false} tickLine={false} />
                   <YAxis
                     domain={yAxis.ticks.length ? [yAxis.ticks[0], yAxis.ticks[yAxis.ticks.length - 1]] : ['auto', 'auto']}
                     ticks={yAxis.ticks}
                     interval={0}
-                    tick={{ fill: C.muted, fontSize: 11 }}
+                    tick={{ fill: c.muted, fontSize: 11 }}
                     axisLine={false}
                     tickLine={false}
                     tickFormatter={(v: number) => v.toFixed(yAxis.decimals)}
                   />
-                  <Tooltip contentStyle={tooltipStyle} labelStyle={{ color: C.text }} formatter={(v) => (typeof v === 'number' ? v.toFixed(3) : String(v))} />
-                  <Line dataKey="base" name="ค่ากลาง" stroke={C.accent} strokeWidth={2} dot={false} isAnimationActive={false} />
+                  <Tooltip
+                    contentStyle={tooltipStyle}
+                    labelStyle={{ color: c.fg }}
+                    itemStyle={{ color: c.fg }}
+                    cursor={{ stroke: c.border }}
+                    formatter={(v) => (typeof v === 'number' ? v.toFixed(3) : String(v))}
+                  />
+                  <Line dataKey="base" name="ค่ากลาง" stroke={c.accent} strokeWidth={2} dot={false} isAnimationActive={false} />
                   {(['lo', 'hi'] as const).map((k) => (
                     <Line
                       key={k}
@@ -167,114 +225,108 @@ export function Results() {
                       activeDot={false}
                       dot={(p: { cx?: number; cy?: number; index?: number; payload?: RoundRow }) => {
                         const won = p.payload !== undefined && p.payload.winner === p.payload[k]
-                        return <circle key={`${k}-${p.index}`} cx={p.cx} cy={p.cy} r={won ? 5 : 4} fill={won ? C.mint : 'rgba(138,147,163,0.5)'} />
+                        return <circle key={`${k}-${p.index}`} cx={p.cx} cy={p.cy} r={won ? 5 : 4} fill={won ? c.good : c.dot} />
                       }}
                     />
                   ))}
                 </LineChart>
               </ResponsiveContainer>
             </div>
-            <ul data-testid="rounds-list" style={{ ...muted, fontSize: 12, margin: '12px 0 0', padding: 0, listStyle: 'none', fontVariantNumeric: 'tabular-nums' }}>
+            <ul data-testid="rounds-list" className="mt-4 space-y-0.5 text-xs text-muted tabular-nums">
               {rows.map((r, i) => (
                 <li key={i}>
                   {r.name}: {r.lo.toFixed(3)} vs {r.hi.toFixed(3)} →{' '}
-                  {r.winner === null ? <span>เสมอ คงค่าเดิม {r.base.toFixed(3)}</span> : <b style={{ color: C.mint }}>{r.winner.toFixed(3)}</b>}
+                  {r.winner === null ? <span>เสมอ คงค่าเดิม {r.base.toFixed(3)}</span> : <b className="text-good">{r.winner.toFixed(3)}</b>}
                 </li>
               ))}
             </ul>
-          </div>
+          </Card>
 
-          <div style={card}>
-            <h2 style={{ fontSize: 16, margin: '0 0 4px' }}>จุดแข็ง / จุดอ่อน</h2>
-            <p style={{ ...muted, margin: '0 0 12px', fontSize: 12 }}>คะแนนเฉลี่ยทุกรอบ (0–100)</p>
-            <div style={{ height: 260 }} data-testid="radar-chart">
+          <Card className="flex flex-col">
+            <h2 className="font-semibold">จุดแข็ง / จุดอ่อน</h2>
+            <p className="mt-1 mb-4 text-xs text-muted">คะแนนเฉลี่ยทุกรอบ (0–100)</p>
+            {/* Grows with the round chart beside it, so the radar sits centred instead of leaving a gap. */}
+            <div className="min-h-64 flex-1" data-testid="radar-chart">
               <ResponsiveContainer width="100%" height="100%">
                 <RadarChart data={radar} outerRadius="72%">
-                  <PolarGrid stroke="rgba(255,255,255,0.08)" />
-                  <PolarAngleAxis dataKey="drill" tick={{ fill: C.text, fontSize: 12 }} />
+                  <PolarGrid stroke={c.grid} />
+                  <PolarAngleAxis dataKey="drill" tick={{ fill: c.fg, fontSize: 12 }} />
                   <PolarRadiusAxis domain={[0, 100]} tick={false} axisLine={false} />
-                  <Radar dataKey="score" name="คะแนน" stroke={C.accent} fill={C.accent} fillOpacity={0.25} isAnimationActive={false} />
-                  <Tooltip contentStyle={tooltipStyle} />
+                  <Radar dataKey="score" name="คะแนน" stroke={c.accent} fill={c.accent} fillOpacity={0.22} isAnimationActive={false} />
+                  <Tooltip contentStyle={tooltipStyle} labelStyle={{ color: c.fg }} itemStyle={{ color: c.fg }} />
                 </RadarChart>
               </ResponsiveContainer>
             </div>
-          </div>
-        </section>
+            {strengths && (
+              <dl data-testid="strengths" className="mt-4 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+                <dt className="text-muted">ถนัดที่สุด</dt>
+                <dd className="font-medium text-good">{DRILL_NAMES[strengths.best]}</dd>
+                <dt className="text-muted">ควรฝึกเพิ่ม</dt>
+                <dd className="font-medium">{DRILL_NAMES[strengths.worst]}</dd>
+              </dl>
+            )}
+          </Card>
+        </motion.section>
 
-        <section style={{ ...card, marginTop: 40, borderColor: 'rgba(255,181,71,0.25)' }} data-testid="final-advice">
-          <h2 style={{ fontSize: 16, margin: '0 0 4px' }}>ขั้นต่อไป</h2>
-          <p style={{ ...muted, margin: 0, fontSize: 14 }}>ใส่ค่านี้ในเกม แล้วลองเล่นใน The Range 2–3 วันก่อนตัดสิน มือต้องใช้เวลาปรับตัวกับเซนส์ใหม่</p>
-        </section>
+        <motion.div {...fadeUp(7)}>
+          <Card data-testid="final-advice" className="mt-12 flex items-start gap-4 border-warn/30">
+            <Crosshair className="mt-0.5 size-5 shrink-0 text-warn" strokeWidth={1.75} aria-hidden />
+            <div>
+              <h2 className="font-semibold">ขั้นต่อไป</h2>
+              <p className="mt-1 text-sm leading-relaxed text-muted">ใส่ค่านี้ในเกม แล้วลองเล่นใน The Range 2–3 วันก่อนตัดสิน มือต้องใช้เวลาปรับตัวกับเซนส์ใหม่</p>
+            </div>
+          </Card>
+        </motion.div>
 
-        <section style={{ display: 'flex', gap: 12, marginTop: 24, flexWrap: 'wrap' }}>
-          <button data-testid="fine-tune-button" onClick={fineTune} style={{ ...secondaryButton, flex: '1 1 200px' }}>
-            ทดสอบละเอียดต่อ
-          </button>
-          <button data-testid="restart-button" onClick={reset} style={{ ...secondaryButton, flex: '1 1 200px' }}>
-            เริ่มใหม่
-          </button>
-        </section>
+        <motion.section {...fadeUp(8)} className="mt-6 grid gap-3 sm:grid-cols-3">
+          <Button data-testid="fine-tune-button" variant="secondary" onClick={fineTune}>
+            <Crosshair className="size-4" strokeWidth={1.75} aria-hidden /> ทดสอบละเอียดต่อ
+          </Button>
+          <Button data-testid="share-button" variant="secondary" disabled={sharing} onClick={() => void saveImage()}>
+            <ImageDown className="size-4" strokeWidth={1.75} aria-hidden /> {sharing ? 'กำลังสร้างรูป…' : 'บันทึกรูปไว้แชร์'}
+          </Button>
+          <Button data-testid="restart-button" variant="secondary" onClick={reset}>
+            <RotateCcw className="size-4" strokeWidth={1.75} aria-hidden /> เริ่มใหม่
+          </Button>
+        </motion.section>
       </div>
 
-      {toast && (
-        <div
-          role="status"
-          data-testid="toast"
-          style={{
-            position: 'fixed',
-            bottom: 24,
-            left: '50%',
-            transform: 'translateX(-50%)',
-            background: C.card,
-            border: `1px solid ${C.borderStrong}`,
-            borderRadius: 10,
-            padding: '10px 16px',
-            fontSize: 14,
-          }}
-        >
-          {toast}
-        </div>
-      )}
+      {/* Off-screen source for the share image; the inner card is what gets captured. */}
+      <div aria-hidden className="pointer-events-none fixed top-0 left-[-10000px]">
+        <ShareCard ref={shareRef} sens={sens} edpi={edpiValue} cm360={cm360} dpi={dpi} profile={profile} />
+      </div>
+
+      {toast}
     </main>
   )
 }
 
-function Stat({ label, help, value, testId }: { label: string; help: string; value: string; testId: string }) {
+function Stat({ i, label, help, value, testId }: { i: number; label: string; help: string; value: string; testId: string }) {
   return (
-    <div style={card} data-testid={testId}>
-      <div style={{ ...muted, display: 'flex', alignItems: 'center', gap: 6 }}>
-        {label}
-        <span
-          tabIndex={0}
-          role="img"
-          aria-label={help}
-          title={help}
-          style={{
-            display: 'inline-grid',
-            placeItems: 'center',
-            width: 16,
-            height: 16,
-            borderRadius: 8,
-            border: `1px solid ${C.borderStrong}`,
-            fontSize: 10,
-            cursor: 'help',
-          }}
-        >
-          ?
-        </span>
-      </div>
-      <div style={{ fontSize: 28, fontWeight: 700, marginTop: 6, fontVariantNumeric: 'tabular-nums' }}>{value}</div>
-    </div>
+    <motion.div {...fadeUp(i)}>
+      <Card data-testid={testId} className="h-full p-5">
+        <div className="flex items-center gap-1.5 text-sm text-muted">
+          {label}
+          <HelpTip label={label} text={help} />
+        </div>
+        <div className="mt-2 text-[28px] font-bold tracking-tight tabular-nums">{value}</div>
+      </Card>
+    </motion.div>
   )
 }
 
-const TONE_COLOR: Record<Insight['tone'], string> = { good: C.mint, warn: C.amber, info: C.muted }
+const TONE: Record<Insight['tone'], { icon: LucideIcon; className: string }> = {
+  good: { icon: CheckCircle2, className: 'text-good' },
+  warn: { icon: TriangleAlert, className: 'text-warn' },
+  info: { icon: Info, className: 'text-muted' },
+}
 
 function InsightCard({ insight }: { insight: Insight }) {
+  const { icon: Icon, className } = TONE[insight.tone]
   return (
-    <div data-testid={`insight-${insight.id}`} style={{ ...card, padding: '16px 20px', display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-      <span aria-hidden style={{ width: 8, height: 8, borderRadius: 4, marginTop: 8, flex: 'none', background: TONE_COLOR[insight.tone] }} />
-      <p style={{ margin: 0, fontSize: 15, lineHeight: 1.6 }}>{insight.text}</p>
-    </div>
+    <Card data-testid={`insight-${insight.id}`} className="flex items-start gap-3 px-5 py-4">
+      <Icon className={cn('mt-0.5 size-5 shrink-0', className)} strokeWidth={1.75} aria-hidden />
+      <p className="text-[15px] leading-relaxed">{insight.text}</p>
+    </Card>
   )
 }

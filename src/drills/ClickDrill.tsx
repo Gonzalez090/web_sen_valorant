@@ -1,5 +1,6 @@
 import { useFrame } from '@react-three/fiber'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import * as THREE from 'three'
 import {
   evaluateClickTrial,
   summarizeClickTrials,
@@ -28,6 +29,9 @@ interface ClickDrillProps extends DrillProps {
  */
 export function ClickDrill({ kind, cfg, offsets, tracker, flush, active, onShot, onComplete, debugRef }: ClickDrillProps) {
   const [target, setTarget] = useState<LookAngles | null>(null)
+  /** Hit effects still playing. */
+  const [bursts, setBursts] = useState<{ id: number; at: LookAngles }[]>([])
+  const burstId = useRef(0)
   const st = useRef({
     index: 0,
     clock: 0,
@@ -98,20 +102,68 @@ export function ClickDrill({ kind, cfg, offsets, tracker, flush, active, onShot,
       const sinceFrame = Math.min(MAX_FRAME_S, Math.max(0, (performance.now() - s.lastFrameWall) / 1000))
       const sample: Sample = { t: s.clock + sinceFrame, look: { ...tracker.current.look } }
       s.trial.samples.push(sample)
+      const hitAt = s.trial.target
       const r = finish(sample)
       publish()
+      if (r?.hit) setBursts((b) => [...b, { id: burstId.current++, at: hitAt }])
       cb.current.onShot?.(r?.hit ?? false)
     }
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
   }, [flush, tracker])
 
-  if (!target) return null
   const radius = TARGET_DISTANCE * Math.tan((cfg.radiusDeg * Math.PI) / 180)
   return (
-    <mesh position={positionFor(target, TARGET_DISTANCE)}>
-      <sphereGeometry args={[radius, 24, 16]} />
-      <meshBasicMaterial color="#FF4655" />
-    </mesh>
+    <>
+      {target && (
+        <mesh position={positionFor(target, TARGET_DISTANCE)}>
+          <sphereGeometry args={[radius, 24, 16]} />
+          <meshBasicMaterial color={TARGET_COLOR} />
+        </mesh>
+      )}
+      {bursts.map((b) => (
+        <Burst key={b.id} position={positionFor(b.at, TARGET_DISTANCE)} radius={radius} onDone={() => setBursts((list) => list.filter((x) => x.id !== b.id))} />
+      ))}
+    </>
   )
+}
+
+const TARGET_COLOR = '#FF4655'
+const BURST_PARTICLES = 14
+const BURST_S = 0.22
+
+/** A hit target breaks into a few fading particles. Short and faint so it never hides the next target. */
+function Burst({ position, radius, onDone }: { position: [number, number, number]; radius: number; onDone: () => void }) {
+  const { geometry, dirs } = useMemo(() => {
+    const dirs = Array.from({ length: BURST_PARTICLES }, () => new THREE.Vector3().randomDirection())
+    const g = new THREE.BufferGeometry()
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(BURST_PARTICLES * 3), 3))
+    return { geometry: g, dirs }
+  }, [])
+  const material = useMemo(() => new THREE.PointsMaterial({ color: TARGET_COLOR, size: radius * 0.35, transparent: true, depthWrite: false }), [radius])
+  useEffect(
+    () => () => {
+      geometry.dispose()
+      material.dispose()
+    },
+    [geometry, material],
+  )
+
+  const age = useRef(0)
+  const done = useRef(false)
+  useFrame((_, delta) => {
+    if (done.current) return
+    age.current += Math.min(delta, MAX_FRAME_S)
+    const k = Math.min(1, age.current / BURST_S)
+    const spread = radius * (0.6 + 2.2 * (1 - (1 - k) * (1 - k)))
+    const pos = geometry.attributes.position as THREE.BufferAttribute
+    dirs.forEach((d, i) => pos.setXYZ(i, d.x * spread, d.y * spread, d.z * spread))
+    pos.needsUpdate = true
+    material.opacity = 0.9 * (1 - k)
+    if (k >= 1) {
+      done.current = true
+      onDone()
+    }
+  })
+  return <points position={position} geometry={geometry} material={material} />
 }
